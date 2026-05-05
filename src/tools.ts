@@ -605,7 +605,7 @@ export async function tool_x_get_tweet(
   return shapeTweetResponse(res.body, post);
 }
 
-function extractTweetId(idOrUrl: string): string | null {
+export function extractTweetId(idOrUrl: string): string | null {
   const trimmed = idOrUrl.trim();
   if (/^\d+$/.test(trimmed)) return trimmed;
   const m = /(?:x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/i.exec(trimmed);
@@ -1197,7 +1197,7 @@ function persistTweetForUser(t: any, user_id: string, observedAt: number): void 
   });
 }
 
-function rowToPostRecord(p: PostRow): unknown {
+export function rowToPostRecord(p: PostRow): unknown {
   const pm: Record<string, number> = {};
   if (p.retweet_count != null) pm.retweet_count = p.retweet_count;
   if (p.reply_count != null) pm.reply_count = p.reply_count;
@@ -1211,21 +1211,22 @@ function rowToPostRecord(p: PostRow): unknown {
   } catch {
     raw = null;
   }
-  return {
+  const out: Record<string, unknown> = {
     tweet_id: p.tweet_id,
     user_id: p.user_id,
     text: p.text,
     created_at: new Date(p.created_at).toISOString(),
-    conversation_id: p.conversation_id ?? undefined,
-    in_reply_to_user_id: p.in_reply_to_user_id ?? undefined,
-    lang: p.lang ?? undefined,
-    public_metrics: Object.keys(pm).length > 0 ? pm : undefined,
     first_observed_at: new Date(p.first_observed_at).toISOString(),
     last_observed_at: new Date(p.last_observed_at).toISOString(),
     deleted: p.deleted_at != null,
     deleted_at: p.deleted_at != null ? new Date(p.deleted_at).toISOString() : null,
     raw,
   };
+  if (p.conversation_id != null) out.conversation_id = p.conversation_id;
+  if (p.in_reply_to_user_id != null) out.in_reply_to_user_id = p.in_reply_to_user_id;
+  if (p.lang != null) out.lang = p.lang;
+  if (Object.keys(pm).length > 0) out.public_metrics = pm;
+  return out;
 }
 
 // ---------- Tool 6: x_follows_changes_since ----------

@@ -178,17 +178,28 @@ npm run consolidate -- --since 1d --output report.md
 The output mixes human prose with dense JSON code blocks. Empty sections are
 omitted. Target output size for one week: 5–15K tokens.
 
-## Smoke test
+## Tests
+
+```bash
+npm test            # 114 unit tests across 7 suites (~1s, no network)
+npm run test:smoke  # end-to-end smoke test against an in-process fake X API
+```
+
+The unit suite covers `parseInterval`, gate state transitions (first call,
+interval elapsed/not-elapsed, never-after-success/error, error-retry intervals
+including 5xx fallback and network errors), `canonicalUrl`/`queryFingerprint`,
+`url_cache` round-trip, `posts` upsert conflict semantics (preserves
+`first_observed_at` and `deleted_at`, refreshes metrics), `markPostDeleted`
+idempotency, post cursor monotonicity, follow-snapshot insert + diff, header
+redaction, bounded log queue overflow + drop counter, log mode 0600, daily
+file naming, `extractTweetId` edge cases, `rowToPostRecord` shape, and the
+consolidate script's section structure (including gzipped JSONL).
 
 `scripts/smoke-test.ts` spins up an in-process fake X API, points the proxy
 at it via `X_API_BASE`, and exercises every acceptance criterion end-to-end
 (REST cache reuse, throttle dedup in `x_posts_since`, deletion handling in
 `x_get_tweet`, bearer-token redaction across all log files, SIGTERM queue
 drain, consolidation script).
-
-```bash
-npm run smoke
-```
 
 ## Caching philosophy
 

@@ -16,7 +16,9 @@
     "start": "node dist/src/index.js",
     "dev": "tsx src/index.ts",
     "consolidate": "tsx bin/consolidate.ts",
-    "smoke": "npm run build && tsx scripts/smoke-test.ts",
+    "test": "node --import tsx --test tests/config.test.ts tests/cache.test.ts tests/gate.test.ts tests/xapi.test.ts tests/log.test.ts tests/tools.test.ts tests/consolidate.test.ts",
+    "test:smoke": "npm run build && tsx scripts/smoke-test.ts",
+    "smoke": "npm run test:smoke",
     "clean": "rm -rf dist"
   },
   "dependencies": {
