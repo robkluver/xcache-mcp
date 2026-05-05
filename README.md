@@ -185,21 +185,25 @@ npm test            # 114 unit tests across 7 suites (~1s, no network)
 npm run test:smoke  # end-to-end smoke test against an in-process fake X API
 ```
 
-The unit suite covers `parseInterval`, gate state transitions (first call,
-interval elapsed/not-elapsed, never-after-success/error, error-retry intervals
-including 5xx fallback and network errors), `canonicalUrl`/`queryFingerprint`,
-`url_cache` round-trip, `posts` upsert conflict semantics (preserves
-`first_observed_at` and `deleted_at`, refreshes metrics), `markPostDeleted`
-idempotency, post cursor monotonicity, follow-snapshot insert + diff, header
-redaction, bounded log queue overflow + drop counter, log mode 0600, daily
-file naming, `extractTweetId` edge cases, `rowToPostRecord` shape, and the
-consolidate script's section structure (including gzipped JSONL).
+The unit suite covers `parseInterval`, gate state transitions, `canonicalUrl`
+/ `queryFingerprint`, `url_cache` round-trip, posts upsert conflict semantics,
+`markPostDeleted` idempotency, post cursor monotonicity, follow-snapshot
+insert + diff, header redaction, bounded log queue overflow + drop counter,
+log mode 0600, `extractTweetId` edge cases, `rowToPostRecord` shape, and the
+consolidate script's section structure.
 
-`scripts/smoke-test.ts` spins up an in-process fake X API, points the proxy
-at it via `X_API_BASE`, and exercises every acceptance criterion end-to-end
-(REST cache reuse, throttle dedup in `x_posts_since`, deletion handling in
-`x_get_tweet`, bearer-token redaction across all log files, SIGTERM queue
-drain, consolidation script).
+`scripts/smoke-test.ts` spins up an in-process fake X API and exercises every
+acceptance criterion end-to-end.
+
+## Living spec (Gherkin)
+
+[`features/`](features/) contains 18 Gherkin feature files (~2,000 lines)
+covering every behavior in this project — gate states, caching philosophy,
+REST passthrough, both MCP transports, all 7 tools, logging, security,
+deletion handling, consolidation, and process lifecycle. See
+[`features/README.md`](features/README.md) for the index. No runner is wired
+up; the files exist as living documentation that survives implementation
+changes.
 
 ## Caching philosophy
 
