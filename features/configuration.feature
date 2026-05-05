@@ -35,7 +35,8 @@ Feature: Configuration loading and reload
       | version             |
       | throttle section    |
     When the proxy starts
-    Then the listener binds to "127.0.0.1:8787" (server defaults)
+    Then the HTTP listener binds to "127.0.0.1:8787" (server defaults)
+    And the stdio transport is NOT attached (server.stdio.enabled defaults to false)
     And the data directory is "$HOME/.openclaw/xcache-mcp" (storage default)
     And X API base is "https://api.x.com" (x_api default)
     And logging level is "info", events on, bodies on (logging defaults)

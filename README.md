@@ -56,7 +56,7 @@ stays out of the environment.
     "host": "127.0.0.1",      // bind to 0.0.0.0 for LAN-accessible deployments
     "port": 8787,
     "http":  { "enabled": true },
-    "stdio": { "enabled": true } // set to false on networked deployments
+    "stdio": { "enabled": false } // set to true only for subprocess use
   },
 
   "storage": {

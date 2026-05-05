@@ -4,7 +4,7 @@
     "host": "127.0.0.1",
     "port": 8787,
     "http": { "enabled": true },
-    "stdio": { "enabled": true }
+    "stdio": { "enabled": false }
   },
   "storage": {
     "root": "~/.openclaw/xcache-mcp"

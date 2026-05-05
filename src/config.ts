@@ -96,7 +96,9 @@ const DEFAULT_SERVER: ServerConfig = {
   host: "127.0.0.1",
   port: 8787,
   http: { enabled: true },
-  stdio: { enabled: true },
+  // The proxy is intended to run as a network service. Subprocess/stdio
+  // integration is opt-in via "server": { "stdio": { "enabled": true } }.
+  stdio: { enabled: false },
 };
 
 const DEFAULT_STORAGE: StorageConfig = {
