@@ -79,6 +79,12 @@ Default values:
 The proxy exposes seven MCP tools. Tool descriptions explicitly steer the
 agent toward the higher-level monitoring tools when appropriate.
 
+> **For the agent itself:** see [`AGENT_GUIDE.md`](AGENT_GUIDE.md) — a
+> dedicated, instruction-style guide written for an AI client of this MCP
+> interface (decision tree, response signals, error patterns, recommended
+> workflows). Paste it into the agent's system prompt or expose it as a
+> resource.
+
 | Tool | Purpose |
 |---|---|
 | `x_get_user_by_username` | One-off user lookup by `@username` |
