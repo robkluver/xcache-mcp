@@ -34,16 +34,29 @@ import { getLogWriter, type EventLogEntry } from "./log.js";
 import { intervalForError, type AppConfig } from "./config.js";
 import * as crypto from "node:crypto";
 
-/** Shared call context (token, base URL). Set once at startup. */
-let appCtx: { bearerToken: string; apiBase: string } | null = null;
+/** Shared call context (token, base URL, log flags). Set once at startup. */
+let appCtx: {
+  bearerToken: string;
+  apiBase: string;
+  logBodies: boolean;
+} | null = null;
 
 export function initToolContext(cfg: AppConfig): void {
-  appCtx = { bearerToken: cfg.bearerToken, apiBase: cfg.xApiBase };
+  appCtx = {
+    bearerToken: cfg.bearerToken,
+    apiBase: cfg.xApiBase,
+    logBodies: cfg.logBodies,
+  };
 }
 
-function ctx(): { bearerToken: string; apiBase: string } {
+function ctx(): { bearerToken: string; apiBase: string; logBodies: boolean } {
   if (!appCtx) throw new Error("Tool context not initialized");
   return appCtx;
+}
+
+function bodyRef(): string | null {
+  if (!appCtx?.logBodies) return null;
+  return "bodies/" + currentBodyFile();
 }
 
 // ---------- Tool definitions for MCP listing ----------
@@ -370,10 +383,40 @@ export async function tool_x_get_tweet(
   // Default for get_tweet operation is "never" — once cached, never refresh.
   // If gate is closed (because we previously cached), serve from cache.
   // If we don't have it cached, we must hit upstream (gate is open from "first_call").
-  const shouldHitUpstream = gate.open;
-
-  if (!shouldHitUpstream && cached) {
-    const post = getPost(id);
+  if (!gate.open) {
+    if (cached) {
+      const post = getPost(id);
+      logEvent({
+        call,
+        request_id: crypto.randomUUID(),
+        url: canonical,
+        endpoint_template: endpointTemplate,
+        query_fingerprint: queryFingerprint(endpointTemplate, params),
+        requested_fields: fieldsListFromParams(params),
+        is_paginated: false,
+        pagination_chain_id: null,
+        pagination_depth: null,
+        operation,
+        account_id,
+        status: cached.status,
+        source: "cache",
+        cache_outcome: "hit",
+        gate_state: { open: gate.open, last_fetched_at: lastFetchedIso(operation, account_id) },
+        duration_ms: 0,
+        response_bytes: cached.body.length,
+        result_count: null,
+        next_token_present: null,
+        rate_limit_limit: null,
+        rate_limit_remaining: null,
+        rate_limit_reset: null,
+        error_class: null,
+        error_message: null,
+        body_truncated: false,
+        body_ref: null,
+      });
+      return shapeTweetResponse(cached.body, post);
+    }
+    // Gate closed and no cache → previous error within retry window. Don't hit upstream.
     logEvent({
       call,
       request_id: crypto.randomUUID(),
@@ -386,12 +429,12 @@ export async function tool_x_get_tweet(
       pagination_depth: null,
       operation,
       account_id,
-      status: cached.status,
-      source: "cache",
-      cache_outcome: "hit",
-      gate_state: { open: gate.open, last_fetched_at: lastFetchedIso(operation, account_id) },
+      status: 0,
+      source: "gate_blocked",
+      cache_outcome: "gate_blocked",
+      gate_state: { open: false, last_fetched_at: lastFetchedIso(operation, account_id) },
       duration_ms: 0,
-      response_bytes: cached.body.length,
+      response_bytes: 0,
       result_count: null,
       next_token_present: null,
       rate_limit_limit: null,
@@ -402,10 +445,17 @@ export async function tool_x_get_tweet(
       body_truncated: false,
       body_ref: null,
     });
-    return shapeTweetResponse(cached.body, post);
+    return {
+      error: "gate_blocked",
+      reason: gate.reason,
+      message:
+        "Throttle gate is closed (likely a recent upstream error). No cached version exists for this tweet.",
+      next_eligible_at: nextEligibleIso(operation, account_id),
+      last_status: gate.last_status,
+    };
   }
 
-  // Gate open or no cache: hit upstream.
+  // Gate open: hit upstream.
   const res = await xapiFetch(ctx(), { path, params });
   const headers = redactHeaders(res.headers);
   // 404 → mark deleted if cached
@@ -446,7 +496,7 @@ export async function tool_x_get_tweet(
       error_class: null,
       error_message: null,
       body_truncated: false,
-      body_ref: "bodies/" + currentBodyFile(),
+      body_ref: bodyRef(),
       body: res.body,
     });
     if (existing) {
@@ -491,7 +541,7 @@ export async function tool_x_get_tweet(
       error_class: res.errorClass,
       error_message: res.errorMessage,
       body_truncated: false,
-      body_ref: "bodies/" + currentBodyFile(),
+      body_ref: bodyRef(),
       body: res.body,
     });
     if (cached) {
@@ -547,7 +597,7 @@ export async function tool_x_get_tweet(
     error_class: null,
     error_message: null,
     body_truncated: false,
-    body_ref: "bodies/" + currentBodyFile(),
+    body_ref: bodyRef(),
     body: res.body,
   });
 
@@ -632,7 +682,39 @@ async function genericLookup(args: {
   const fp = queryFingerprint(endpointTemplate, params);
   const fields = fieldsListFromParams(params);
 
-  if (!gate.open && cached) {
+  if (!gate.open) {
+    if (cached) {
+      logEvent({
+        call,
+        request_id: crypto.randomUUID(),
+        url: canonical,
+        endpoint_template: endpointTemplate,
+        query_fingerprint: fp,
+        requested_fields: fields,
+        is_paginated: false,
+        pagination_chain_id: null,
+        pagination_depth: null,
+        operation,
+        account_id,
+        status: cached.status,
+        source: "cache",
+        cache_outcome: "hit",
+        gate_state: { open: gate.open, last_fetched_at: lastFetchedIso(operation, account_id) },
+        duration_ms: 0,
+        response_bytes: cached.body.length,
+        result_count: null,
+        next_token_present: null,
+        rate_limit_limit: null,
+        rate_limit_remaining: null,
+        rate_limit_reset: null,
+        error_class: null,
+        error_message: null,
+        body_truncated: false,
+        body_ref: null,
+      });
+      return safeParse(cached.body);
+    }
+    // Gate closed and no cache → previous error within retry window. Don't hit upstream.
     logEvent({
       call,
       request_id: crypto.randomUUID(),
@@ -645,12 +727,12 @@ async function genericLookup(args: {
       pagination_depth: null,
       operation,
       account_id,
-      status: cached.status,
-      source: "cache",
-      cache_outcome: "hit",
-      gate_state: { open: gate.open, last_fetched_at: lastFetchedIso(operation, account_id) },
+      status: 0,
+      source: "gate_blocked",
+      cache_outcome: "gate_blocked",
+      gate_state: { open: false, last_fetched_at: lastFetchedIso(operation, account_id) },
       duration_ms: 0,
-      response_bytes: cached.body.length,
+      response_bytes: 0,
       result_count: null,
       next_token_present: null,
       rate_limit_limit: null,
@@ -661,7 +743,14 @@ async function genericLookup(args: {
       body_truncated: false,
       body_ref: null,
     });
-    return safeParse(cached.body);
+    return {
+      error: "gate_blocked",
+      reason: gate.reason,
+      message:
+        "Throttle gate is closed (likely a recent upstream error) and no cached response exists.",
+      next_eligible_at: nextEligibleIso(operation, account_id),
+      last_status: gate.last_status,
+    };
   }
 
   // Hit upstream.
@@ -701,7 +790,7 @@ async function genericLookup(args: {
       error_class: res.errorClass,
       error_message: res.errorMessage,
       body_truncated: false,
-      body_ref: "bodies/" + currentBodyFile(),
+      body_ref: bodyRef(),
       body: res.body,
     });
     if (cached) return safeParse(cached.body);
@@ -747,7 +836,7 @@ async function genericLookup(args: {
     error_class: null,
     error_message: null,
     body_truncated: false,
-    body_ref: "bodies/" + currentBodyFile(),
+    body_ref: bodyRef(),
     body: res.body,
   });
   return safeParse(res.body);
@@ -911,7 +1000,7 @@ export async function tool_x_posts_since(
           error_class: res.errorClass,
           error_message: res.errorMessage,
           body_truncated: false,
-          body_ref: "bodies/" + currentBodyFile(),
+          body_ref: bodyRef(),
           body: res.body,
         });
         lastErrorRecorded = true;
@@ -984,7 +1073,7 @@ export async function tool_x_posts_since(
         error_class: null,
         error_message: null,
         body_truncated: false,
-        body_ref: "bodies/" + currentBodyFile(),
+        body_ref: bodyRef(),
         body: res.body,
       });
 
@@ -1223,7 +1312,7 @@ export async function tool_x_follows_changes_since(
           error_class: res.errorClass,
           error_message: res.errorMessage,
           body_truncated: false,
-          body_ref: "bodies/" + currentBodyFile(),
+          body_ref: bodyRef(),
           body: res.body,
         });
         errored = true;
@@ -1272,7 +1361,7 @@ export async function tool_x_follows_changes_since(
         error_class: null,
         error_message: null,
         body_truncated: false,
-        body_ref: "bodies/" + currentBodyFile(),
+        body_ref: bodyRef(),
         body: res.body,
       });
       if (json?.meta?.next_token) {
@@ -1462,7 +1551,7 @@ export async function tool_x_verify_posts(
         error_class: res.errorClass,
         error_message: res.errorMessage,
         body_truncated: false,
-        body_ref: "bodies/" + currentBodyFile(),
+        body_ref: bodyRef(),
         body: res.body,
       });
       break;
@@ -1526,7 +1615,7 @@ export async function tool_x_verify_posts(
       error_class: null,
       error_message: null,
       body_truncated: false,
-      body_ref: "bodies/" + currentBodyFile(),
+      body_ref: bodyRef(),
       body: res.body,
     });
   }

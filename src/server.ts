@@ -89,16 +89,42 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
       agent_session_id: (req.headers["x-agent-session"] as string | undefined) ?? null,
     };
 
-    if (!gate.open && cached) {
+    if (!gate.open) {
+      if (cached) {
+        writer.enqueueEvent({
+          ...baseLog,
+          request_id: crypto.randomUUID(),
+          status: cached.status,
+          source: "cache",
+          cache_outcome: "hit",
+          gate_state: { open: false, last_fetched_at: lastFetchedIso(operation, account_id) },
+          duration_ms: 0,
+          response_bytes: cached.body.length,
+          result_count: null,
+          next_token_present: null,
+          rate_limit_limit: null,
+          rate_limit_remaining: null,
+          rate_limit_reset: null,
+          error_class: null,
+          error_message: null,
+          body_truncated: false,
+          body_ref: null,
+        });
+        reply.code(cached.status);
+        reply.header("content-type", "application/json");
+        reply.header("x-xcache-source", "cache");
+        return cached.body;
+      }
+      // Gate closed and no cache → previous error within retry window. Don't hit upstream.
       writer.enqueueEvent({
         ...baseLog,
         request_id: crypto.randomUUID(),
-        status: cached.status,
-        source: "cache",
-        cache_outcome: "hit",
+        status: 0,
+        source: "gate_blocked",
+        cache_outcome: "gate_blocked",
         gate_state: { open: false, last_fetched_at: lastFetchedIso(operation, account_id) },
         duration_ms: 0,
-        response_bytes: cached.body.length,
+        response_bytes: 0,
         result_count: null,
         next_token_present: null,
         rate_limit_limit: null,
@@ -109,10 +135,14 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
         body_truncated: false,
         body_ref: null,
       });
-      reply.code(cached.status);
+      reply.code(429);
       reply.header("content-type", "application/json");
-      reply.header("x-xcache-source", "cache");
-      return cached.body;
+      reply.header("x-xcache-source", "gate_blocked");
+      return JSON.stringify({
+        error: "gate_blocked",
+        message:
+          "Throttle gate is closed (likely a recent upstream error) and no cached response exists.",
+      });
     }
 
     const res = await xapiFetch(
@@ -145,7 +175,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
         error_class: res.errorClass,
         error_message: res.errorMessage,
         body_truncated: false,
-        body_ref: "bodies/" + dayFile,
+        body_ref: cfg.logBodies ? "bodies/" + dayFile : null,
       });
       writer.enqueueBody({ request_id: res.requestId, body: res.body });
       if (cached) {
@@ -185,7 +215,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
       error_class: null,
       error_message: null,
       body_truncated: false,
-      body_ref: "bodies/" + dayFile,
+      body_ref: cfg.logBodies ? "bodies/" + dayFile : null,
     });
     writer.enqueueBody({ request_id: res.requestId, body: res.body });
     reply.code(res.status);

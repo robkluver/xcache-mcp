@@ -178,6 +178,18 @@ npm run consolidate -- --since 1d --output report.md
 The output mixes human prose with dense JSON code blocks. Empty sections are
 omitted. Target output size for one week: 5–15K tokens.
 
+## Smoke test
+
+`scripts/smoke-test.ts` spins up an in-process fake X API, points the proxy
+at it via `X_API_BASE`, and exercises every acceptance criterion end-to-end
+(REST cache reuse, throttle dedup in `x_posts_since`, deletion handling in
+`x_get_tweet`, bearer-token redaction across all log files, SIGTERM queue
+drain, consolidation script).
+
+```bash
+npm run smoke
+```
+
 ## Caching philosophy
 
 Cache is **infinite retention**, not TTL. Two consequences:
