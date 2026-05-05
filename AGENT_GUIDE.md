@@ -167,6 +167,21 @@ unfollowed (rare — most agent use cases only care about *new* follows),
 call `x_follows_changes_since` with `force_refresh: true`. That bypasses
 the throttle gate AND walks to completion. Expensive; do it sparingly.
 
+### `force_refresh_suppressed` (on `x_posts_since`, `x_follows_changes_since`)
+
+The deployment can disable `force_refresh` entirely as a cost guard
+(`tools.permit_force_refresh: false` in `app.config.json`). When that
+policy is in effect AND you sent `force_refresh: true`, the proxy:
+
+- Silently downgrades the call (treats it as `force_refresh: false`)
+- Includes `force_refresh_suppressed: true` and a
+  `force_refresh_suppressed_reason` string in the response
+
+If you see this flag, **don't loop trying to force a refresh** — the
+deployment policy will keep blocking it. Either accept the cached/throttled
+result, or surface the situation to the user so they can decide whether
+to ask the operator to flip the config.
+
 ### `truncated` (on `x_posts_since`)
 
 - `true` → the `max_pages` cap was hit while paginating. There may be older

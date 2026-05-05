@@ -82,7 +82,13 @@ stays out of the environment.
   "tools": {
     // Default exposes only the two ★ monitoring tools. Set to "*" to enable
     // all 7, or list explicit names to enable a subset.
-    "enabled": ["x_posts_since", "x_follows_changes_since"]
+    "enabled": ["x_posts_since", "x_follows_changes_since"],
+    // When false, the proxy ignores force_refresh: true from clients on the
+    // tools that accept it (x_posts_since, x_follows_changes_since). Use
+    // this as a safety net to bound API spend regardless of what the client
+    // asks for. Responses include force_refresh_suppressed: true when this
+    // policy downgraded a request, so the agent can react.
+    "permit_force_refresh": true
   },
 
   "throttle": {

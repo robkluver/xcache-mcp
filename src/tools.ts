@@ -34,13 +34,14 @@ import { getLogWriter, type EventLogEntry } from "./log.js";
 import { intervalForError, type AppConfig } from "./config.js";
 import * as crypto from "node:crypto";
 
-/** Shared call context (token, base URL, log flags, time floor).
- *  Set once at startup by initToolContext(). */
+/** Shared call context (token, base URL, log flags, time floor, policy
+ *  flags). Set once at startup by initToolContext(). */
 let appCtx: {
   bearerToken: string;
   apiBase: string;
   logBodies: boolean;
   xApiEarliestDataMs: number | null;
+  permitForceRefresh: boolean;
 } | null = null;
 
 export function initToolContext(cfg: AppConfig): void {
@@ -49,6 +50,7 @@ export function initToolContext(cfg: AppConfig): void {
     apiBase: cfg.xApiBase,
     logBodies: cfg.logBodies,
     xApiEarliestDataMs: cfg.xApiEarliestDataMs,
+    permitForceRefresh: cfg.permitForceRefresh,
   };
 }
 
@@ -57,6 +59,7 @@ function ctx(): {
   apiBase: string;
   logBodies: boolean;
   xApiEarliestDataMs: number | null;
+  permitForceRefresh: boolean;
 } {
   if (!appCtx) throw new Error("Tool context not initialized");
   return appCtx;
@@ -171,7 +174,11 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
           type: "string",
           description: "ISO 8601 timestamp; only posts created at or after this time are returned.",
         },
-        force_refresh: { type: "boolean" },
+        force_refresh: {
+          type: "boolean",
+          description:
+            "Bypass the throttle gate and fetch fresh data this call. May be ignored by deployment policy (tools.permit_force_refresh); when ignored, the response includes force_refresh_suppressed: true.",
+        },
         max_pages: {
           type: "integer",
           minimum: 1,
@@ -195,7 +202,11 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
       properties: {
         username: { type: "string" },
         since_iso: { type: "string" },
-        force_refresh: { type: "boolean" },
+        force_refresh: {
+          type: "boolean",
+          description:
+            "Bypass the throttle gate AND walk to completion (no early-stop), so unfollows are accurate. May be ignored by deployment policy (tools.permit_force_refresh); when ignored, the response includes force_refresh_suppressed: true.",
+        },
       },
       required: ["username", "since_iso"],
       additionalProperties: false,
@@ -943,7 +954,14 @@ export async function tool_x_posts_since(
   const account_id = user_id;
   const gate = gateState(operation, account_id);
   const cursor = getPostCursor(user_id);
-  const shouldFetch = gate.open || input.force_refresh === true || !cursor;
+
+  // Apply the permit_force_refresh policy: clients can ask for force_refresh,
+  // but the proxy ignores it when the deployment has disabled it (cost guard).
+  const requestedForceRefresh = input.force_refresh === true;
+  const effectiveForceRefresh = requestedForceRefresh && appCtx?.permitForceRefresh !== false;
+  const forceRefreshSuppressed = requestedForceRefresh && !effectiveForceRefresh;
+
+  const shouldFetch = gate.open || effectiveForceRefresh || !cursor;
 
   let touched_upstream = false;
   let truncated = false;
@@ -1152,6 +1170,13 @@ export async function tool_x_posts_since(
       last_fetched_at: lastFetchedIso(operation, account_id) ?? "",
       next_eligible_at: nextEligibleIso(operation, account_id) ?? "",
     },
+    ...(forceRefreshSuppressed
+      ? {
+          force_refresh_suppressed: true,
+          force_refresh_suppressed_reason:
+            "tools.permit_force_refresh is false in the proxy config; force_refresh: true was ignored.",
+        }
+      : {}),
   };
 }
 
@@ -1260,7 +1285,14 @@ export async function tool_x_follows_changes_since(
   const account_id = user_id;
   const gate = gateState(operation, account_id);
   const existingLatest = latestSnapshotForUser(user_id);
-  const shouldFetch = gate.open || input.force_refresh === true || !existingLatest;
+
+  // Apply the permit_force_refresh policy: clients can ask for force_refresh,
+  // but the proxy ignores it when the deployment has disabled it (cost guard).
+  const requestedForceRefresh = input.force_refresh === true;
+  const effectiveForceRefresh = requestedForceRefresh && appCtx?.permitForceRefresh !== false;
+  const forceRefreshSuppressed = requestedForceRefresh && !effectiveForceRefresh;
+
+  const shouldFetch = gate.open || effectiveForceRefresh || !existingLatest;
 
   let touched_upstream = false;
   const endpointTemplate = "/2/users/{id}/following";
@@ -1273,9 +1305,7 @@ export async function tool_x_follows_changes_since(
   // nothing newer than what we already know past this point. force_refresh
   // disables the early-stop so callers can audit unfollows accurately.
   const priorMembers: Set<string> | null =
-    existingLatest && input.force_refresh !== true
-      ? new Set(snapshotMemberIds(existingLatest.id))
-      : null;
+    existingLatest && !effectiveForceRefresh ? new Set(snapshotMemberIds(existingLatest.id)) : null;
 
   if (shouldFetch) {
     touched_upstream = true;
@@ -1484,6 +1514,13 @@ export async function tool_x_follows_changes_since(
         last_fetched_at: lastFetchedIso(operation, account_id) ?? "",
         next_eligible_at: nextEligibleIso(operation, account_id) ?? "",
       },
+      ...(forceRefreshSuppressed
+        ? {
+            force_refresh_suppressed: true,
+            force_refresh_suppressed_reason:
+              "tools.permit_force_refresh is false in the proxy config; force_refresh: true was ignored.",
+          }
+        : {}),
     };
   }
   const baseline = snapshotAtOrBefore(user_id, sinceMs);
@@ -1540,6 +1577,13 @@ export async function tool_x_follows_changes_since(
       last_fetched_at: lastFetchedIso(operation, account_id) ?? "",
       next_eligible_at: nextEligibleIso(operation, account_id) ?? "",
     },
+    ...(forceRefreshSuppressed
+      ? {
+          force_refresh_suppressed: true,
+          force_refresh_suppressed_reason:
+            "tools.permit_force_refresh is false in the proxy config; force_refresh: true was ignored.",
+        }
+      : {}),
   };
 }
 

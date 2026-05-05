@@ -248,6 +248,37 @@ describe("loadAppFileConfig + tools section integration", () => {
   });
 });
 
+describe("tools.permit_force_refresh", () => {
+  test("absent → defaults to true (current behavior preserved)", async () => {
+    const { resolveAppConfig } = await import("../src/config.ts");
+    const f = writeTmpConfig({
+      version: 1,
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    process.env.X_BEARER_TOKEN = "test";
+    process.env.XCACHE_CONFIG = f;
+    loadAppFileConfig(f);
+    const cfg = resolveAppConfig();
+    assert.equal(cfg.permitForceRefresh, true);
+    fs.unlinkSync(f);
+  });
+
+  test("explicit false → AppConfig.permitForceRefresh is false", async () => {
+    const { resolveAppConfig } = await import("../src/config.ts");
+    const f = writeTmpConfig({
+      version: 1,
+      tools: { enabled: "*", permit_force_refresh: false },
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    process.env.X_BEARER_TOKEN = "test";
+    process.env.XCACHE_CONFIG = f;
+    loadAppFileConfig(f);
+    const cfg = resolveAppConfig();
+    assert.equal(cfg.permitForceRefresh, false);
+    fs.unlinkSync(f);
+  });
+});
+
 describe("x_api.earliest_data_iso", () => {
   test("absent → preserved as undefined on the file model", () => {
     const f = writeTmpConfig({

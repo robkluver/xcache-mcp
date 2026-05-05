@@ -42,6 +42,11 @@ export type ToolsConfig = {
   /** Enabled tool names. Either an explicit list or the literal "*" (all).
    *  Optional — if absent, the default starred set is used. */
   enabled?: string[] | "*";
+  /** When false, the proxy ignores force_refresh: true from clients on tools
+   *  that accept it (x_posts_since, x_follows_changes_since). The
+   *  responses include force_refresh_suppressed: true so the agent knows
+   *  its request was downgraded. Defaults to true (current behavior). */
+  permit_force_refresh?: boolean;
 };
 
 export type ThrottleConfig = {
@@ -76,6 +81,7 @@ export type AppConfig = {
   logEvents: boolean;
   logBodies: boolean;
   enabledTools: Set<string>;
+  permitForceRefresh: boolean;
   dbPath: string;
   logsDir: string;
 };
@@ -293,6 +299,7 @@ export function resolveAppConfig(): AppConfig {
     logEvents: logging.events,
     logBodies: logging.bodies,
     enabledTools: getFileEnabledTools(),
+    permitForceRefresh: file.tools?.permit_force_refresh ?? true,
     dbPath: path.join(storage.root, "data.db"),
     logsDir,
   };

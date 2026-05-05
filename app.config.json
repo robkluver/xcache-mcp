@@ -18,7 +18,8 @@
     "bodies": true
   },
   "tools": {
-    "enabled": ["x_posts_since", "x_follows_changes_since"]
+    "enabled": ["x_posts_since", "x_follows_changes_since"],
+    "permit_force_refresh": true
   },
   "throttle": {
     "default_min_interval": "24h",

@@ -65,6 +65,33 @@ Feature: Configuration loading and reload
     Then the request goes to "http://127.0.0.1:9999/2/..."
     And no requests are made to "https://api.x.com"
 
+  # ---------- tools.permit_force_refresh policy ----------
+
+  Scenario: tools.permit_force_refresh defaults to true (current behavior)
+    Given app.config.json has no tools.permit_force_refresh field
+    When the proxy starts
+    Then force_refresh: true from clients is honored as before
+
+  Scenario: tools.permit_force_refresh: false suppresses client force_refresh
+    Given app.config.json tools.permit_force_refresh is false
+    When a client calls x_posts_since with {"force_refresh": true}
+    Then the proxy treats the call as force_refresh: false (gate is honored)
+    And the response includes force_refresh_suppressed: true
+    And force_refresh_suppressed_reason names tools.permit_force_refresh
+
+  Scenario: Same policy applies to x_follows_changes_since
+    Given app.config.json tools.permit_force_refresh is false
+    When a client calls x_follows_changes_since with {"force_refresh": true}
+    Then the proxy treats the call as force_refresh: false
+    And the early-stop heuristic remains in effect
+    And response.force_refresh_suppressed is true
+
+  Scenario: Suppression flag is omitted when client did NOT request force_refresh
+    Given app.config.json tools.permit_force_refresh is false
+    When a client calls x_posts_since without force_refresh (or with false)
+    Then response.force_refresh_suppressed is absent
+    # Only present when the proxy actually downgraded a request.
+
   Scenario: x_api.earliest_data_iso clamps time-bounded queries
     Given app.config.json x_api.earliest_data_iso is "2025-06-01T00:00:00Z"
     When x_posts_since is called with since_iso "2024-01-01T00:00:00Z" for a user with no cursor yet
