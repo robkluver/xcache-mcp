@@ -1,10 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { dispatchTool, TOOL_DEFINITIONS, type ToolCallContext } from "./tools.js";
+import { dispatchTool, enabledToolDefinitions, type ToolCallContext } from "./tools.js";
 
 export type McpServerCtx = {
   client_kind: "mcp_http" | "mcp_stdio";
   agent_session_id?: string;
+  enabledTools: Set<string>;
 };
 
 export function createMcpServer(ctx: McpServerCtx): Server {
@@ -22,7 +23,7 @@ export function createMcpServer(ctx: McpServerCtx): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      tools: TOOL_DEFINITIONS.map((t) => ({
+      tools: enabledToolDefinitions(ctx.enabledTools).map((t) => ({
         name: t.name,
         description: t.description,
         inputSchema: t.inputSchema,
@@ -39,7 +40,7 @@ export function createMcpServer(ctx: McpServerCtx): Server {
       ...(ctx.agent_session_id ? { agent_session_id: ctx.agent_session_id } : {}),
     };
     try {
-      const result = await dispatchTool(callCtx, name, args);
+      const result = await dispatchTool(callCtx, name, args, ctx.enabledTools);
       return {
         content: [
           {

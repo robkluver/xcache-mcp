@@ -7,7 +7,7 @@ Feature: MCP over Streamable HTTP (stateless mode)
 
   Background:
     Given the proxy is running with X_BEARER_TOKEN set
-    And XCACHE_NO_HTTP is not set
+    And server.http.enabled is true
 
   Scenario: tools/list returns all seven tools
     When the client sends:

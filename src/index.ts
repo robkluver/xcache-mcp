@@ -1,16 +1,27 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadAppConfig, loadThrottleConfig, reloadThrottleConfig } from "./config.js";
+import {
+  loadAppFileConfig,
+  reloadAppFileConfig,
+  resolveAppConfig,
+  getFileEnabledTools,
+} from "./config.js";
 import { closeDb, openDb } from "./cache.js";
 import { initLogWriter, getLogWriter } from "./log.js";
 import { initToolContext } from "./tools.js";
 import { buildFastify } from "./server.js";
 import { createMcpServer } from "./mcp.js";
 
+/** Replace the contents of `target` with `source`, preserving the Set reference
+ *  so consumers holding a reference (e.g. the long-lived stdio MCP server) see
+ *  the change without being re-wired. Used by SIGHUP. */
+function applyEnabledToolsInPlace(target: Set<string>, source: Set<string>): void {
+  target.clear();
+  for (const name of source) target.add(name);
+}
+
 async function main(): Promise<void> {
-  // If invoked as a CLI (e.g. `xcache-mcp consolidate ...`), forward to the
-  // consolidator. We avoid re-introducing an extra bin script that imports a
-  // separate file at runtime; we just dispatch on argv[2].
+  // CLI-style subcommand dispatch (e.g. `xcache-mcp consolidate ...`).
   const cmd = process.argv[2];
   if (cmd === "consolidate") {
     const mod = await import("../bin/consolidate.js");
@@ -18,26 +29,36 @@ async function main(): Promise<void> {
     return;
   }
 
-  const cfg = loadAppConfig();
-  loadThrottleConfig(cfg.throttleConfigPath);
+  const configPath = process.env.XCACHE_CONFIG ?? "./app.config.json";
+  loadAppFileConfig(configPath);
+  const cfg = resolveAppConfig();
+
   openDb(cfg.dbPath);
-  initLogWriter(cfg.logsDir, cfg.logBodies);
+  initLogWriter(cfg.logsDir, cfg.logBodies, cfg.logEvents);
   initToolContext(cfg);
 
-  // SIGHUP → reload throttle config (no-op if file unreadable, just logs to stderr).
+  // SIGHUP → reload app config file (no-op if file unreadable, just logs to stderr).
+  // tools.enabled changes propagate to in-flight servers because we mutate
+  // cfg.enabledTools in place. Other resolved fields (host, port, log levels) do
+  // NOT live-reload — restart the process to pick those up.
   process.on("SIGHUP", () => {
     try {
-      reloadThrottleConfig();
-      process.stderr.write("[xcache-mcp] reloaded throttle config\n");
+      reloadAppFileConfig();
+      applyEnabledToolsInPlace(cfg.enabledTools, getFileEnabledTools());
+      process.stderr.write("[xcache-mcp] reloaded app config\n");
     } catch (err) {
-      process.stderr.write(
-        `[xcache-mcp] reload throttle config failed: ${(err as Error).message}\n`,
-      );
+      process.stderr.write(`[xcache-mcp] reload app config failed: ${(err as Error).message}\n`);
     }
   });
 
+  process.stderr.write(
+    `[xcache-mcp] enabled tools (${cfg.enabledTools.size}): ${
+      cfg.enabledTools.size === 0 ? "<none>" : Array.from(cfg.enabledTools).sort().join(", ")
+    }\n`,
+  );
+
   let httpClose: (() => Promise<void>) | null = null;
-  if (!cfg.noHttp) {
+  if (cfg.httpEnabled) {
     const app = buildFastify(cfg);
     await app.listen({ host: cfg.host, port: cfg.port });
     process.stderr.write(`[xcache-mcp] HTTP listening on ${cfg.host}:${cfg.port}\n`);
@@ -47,8 +68,11 @@ async function main(): Promise<void> {
   }
 
   let stdioClose: (() => Promise<void>) | null = null;
-  if (!cfg.noStdio) {
-    const server = createMcpServer({ client_kind: "mcp_stdio" });
+  if (cfg.stdioEnabled) {
+    const server = createMcpServer({
+      client_kind: "mcp_stdio",
+      enabledTools: cfg.enabledTools,
+    });
     const transport = new StdioServerTransport();
     await server.connect(transport);
     process.stderr.write("[xcache-mcp] MCP stdio transport connected\n");

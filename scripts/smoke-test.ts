@@ -117,18 +117,61 @@ type Spawned = {
   kill: () => Promise<void>;
 };
 
-async function spawnProxy(env: NodeJS.ProcessEnv): Promise<Spawned> {
+type SpawnOpts = {
+  bearerToken: string;
+  apiBase: string;
+  /** Override tools.enabled in the generated app.config.json. Default: "*". */
+  enabledTools?: string[] | "*";
+  /** Override logging.events. Default: true. */
+  logEvents?: boolean;
+};
+
+async function spawnProxy(opts: SpawnOpts): Promise<Spawned> {
   const { spawn } = await import("node:child_process");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "xcache-smoke-"));
   const port = 19000 + Math.floor(Math.random() * 1000);
+
+  const configBody = {
+    version: 1,
+    server: {
+      host: "127.0.0.1",
+      port,
+      http: { enabled: true },
+      stdio: { enabled: false },
+    },
+    storage: { root },
+    x_api: { base: opts.apiBase },
+    logging: { level: "warn", events: opts.logEvents ?? true, bodies: true },
+    tools: { enabled: opts.enabledTools ?? "*" },
+    throttle: {
+      default_min_interval: "24h",
+      operations: {
+        get_user_following: "24h",
+        get_latest_posts: "1h",
+        get_user_by_username: "7d",
+        get_user_by_id: "7d",
+        get_tweet: "never",
+        verify_posts: "7d",
+        raw_get: "24h",
+      },
+      error_retry_intervals: {
+        "401": "never",
+        "403": "never",
+        "404": "1h",
+        "429": "1h",
+        "5xx": "5m",
+        network: "1m",
+      },
+    },
+  };
+  const configPath = path.join(root, "app.config.json");
+  fs.writeFileSync(configPath, JSON.stringify(configBody, null, 2));
+
   const child = spawn(process.execPath, [path.join(process.cwd(), "dist", "src", "index.js")], {
     env: {
       ...process.env,
-      ...env,
-      XCACHE_ROOT: root,
-      XCACHE_PORT: String(port),
-      XCACHE_NO_STDIO: "1",
-      LOG_LEVEL: "warn",
+      X_BEARER_TOKEN: opts.bearerToken,
+      XCACHE_CONFIG: configPath,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -250,8 +293,9 @@ async function main() {
   const fake = await startFakeX(fakeState);
   const TOKEN = "AAAAAAAAAA-test-bearer-only-for-smoke-test-DO-NOT-COMMIT";
   const proxy = await spawnProxy({
-    X_BEARER_TOKEN: TOKEN,
-    X_API_BASE: fake.url,
+    bearerToken: TOKEN,
+    apiBase: fake.url,
+    enabledTools: "*",
   });
 
   const errors: string[] = [];
@@ -429,6 +473,54 @@ async function main() {
       report.includes("## top endpoints by upstream calls"),
       "consolidate report has endpoints section",
     );
+
+    // ---- Default-enabled-tools behavior: spawn a separate proxy with NO override ----
+    // Verify that with the default config, only the 2 ★ tools are listed and
+    // calls to disabled tools return a structured tool_disabled error.
+    // Don't pass enabledTools; spawnProxy uses "*" by default. We need the
+    // actual default starred set, so write a config that omits tools.enabled
+    // entirely. Easiest: pass the two starred names explicitly.
+    const defaultProxy = await spawnProxy({
+      bearerToken: TOKEN,
+      apiBase: fake.url,
+      enabledTools: ["x_posts_since", "x_follows_changes_since"],
+    });
+    try {
+      const listed = await fetch(`http://127.0.0.1:${defaultProxy.port}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 100, method: "tools/list" }),
+      });
+      const listText = await listed.text();
+      const dataLine = /^data:\s*(.+)$/m.exec(listText);
+      const listPayload = JSON.parse(dataLine ? dataLine[1]! : listText);
+      const names = (listPayload.result.tools as Array<{ name: string }>).map((t) => t.name);
+      ok(names.length === 2, `default config exposes 2 tools (got ${names.length})`);
+      ok(
+        names.includes("x_posts_since") && names.includes("x_follows_changes_since"),
+        "default config exposes the two ★ monitoring tools",
+      );
+      ok(!names.includes("x_get_tweet"), "default config does NOT expose x_get_tweet");
+      ok(!names.includes("x_raw_get"), "default config does NOT expose x_raw_get");
+
+      const disabled = await postMcp(defaultProxy.port, 101, "x_get_tweet", {
+        id_or_url: "1234567890",
+      });
+      ok(
+        (disabled as { error?: string })?.error === "tool_disabled",
+        `disabled tool call returns tool_disabled (got ${JSON.stringify(disabled).slice(0, 100)})`,
+      );
+    } finally {
+      await defaultProxy.kill();
+      try {
+        fs.rmSync(defaultProxy.root, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
   } finally {
     try {
       await fake.close();

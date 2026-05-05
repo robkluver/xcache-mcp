@@ -7,7 +7,7 @@ Feature: MCP over stdio (subprocess mode)
 
   Background:
     Given OpenClaw spawns the proxy with stdin/stdout connected
-    And XCACHE_NO_STDIO is not set
+    And server.stdio.enabled is true
 
   Scenario: Stdio transport is connected at startup
     When the proxy boots
@@ -44,15 +44,15 @@ Feature: MCP over stdio (subprocess mode)
     And no per-request teardown occurs (unlike the stateless HTTP path)
 
   Scenario: Combined stdio + HTTP mode
-    Given XCACHE_NO_STDIO is not set
-    And XCACHE_NO_HTTP is not set
+    Given server.stdio.enabled is true
+    And server.http.enabled is true
     When the proxy starts
     Then both transports are active
     And HTTP requests and stdio requests are processed independently
     And both surfaces share the same SQLite database and log writer
 
   Scenario: stdio-only mode for OpenClaw subprocess
-    Given XCACHE_NO_HTTP is set to "1"
+    Given server.http.enabled is false
     When the proxy starts
     Then no HTTP listener is opened
     And only the stdio transport is available

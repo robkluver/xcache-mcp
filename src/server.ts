@@ -236,6 +236,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
     });
     const server = createMcpServer({
       client_kind: "mcp_http",
+      enabledTools: cfg.enabledTools,
       ...(agentSession ? { agent_session_id: agentSession } : {}),
     });
 

@@ -9,7 +9,7 @@ OpenClaw or any other MCP-aware AI agent.
   deletes the post upstream, the proxy remembers it.
 - **Throttle, don't TTL.** Cache entries never expire. Whether to refresh
   upstream is decided by per-`(operation, account)` throttle gates configured
-  via `throttle.config.json`.
+  via `app.config.json`.
 - **REST mirror + MCP server.** Fastify-served `/2/*` REST mirror for ad-hoc
   curl/script use, plus stateless MCP over Streamable HTTP at `POST /mcp` and
   MCP over stdio.
@@ -31,48 +31,87 @@ npm start
 ```
 
 Default listener: `http://127.0.0.1:8787`. Data and logs go to
-`~/.openclaw/xcache-mcp/` by default (override with `XCACHE_ROOT`).
+`~/.openclaw/xcache-mcp/` by default. Out of the box only the two ★ monitoring
+tools (`x_posts_since`, `x_follows_changes_since`) are exposed; edit
+`tools.enabled` in the config to expose others.
 
 ### Environment variables
 
-| Var | Default | Purpose |
-|---|---|---|
-| `X_BEARER_TOKEN` | — | App-only bearer for `api.x.com` (required for upstream calls) |
-| `XCACHE_PORT` | `8787` | HTTP listener port |
-| `XCACHE_HOST` | `127.0.0.1` | HTTP listener host |
-| `XCACHE_ROOT` | `~/.openclaw/xcache-mcp` | Data directory (db, logs) |
-| `XCACHE_THROTTLE_CONFIG` | `./throttle.config.json` | Path to throttle config |
-| `XCACHE_NO_HTTP` | — | Set to `1` to skip the HTTP listener |
-| `XCACHE_NO_STDIO` | — | Set to `1` to skip the MCP stdio transport |
-| `XCACHE_LOG_BODIES` | `1` | Set to `0` to skip writing request bodies log |
-| `LOG_LEVEL` | `info` | Fastify/pino log level (logs to stderr only) |
-| `X_API_BASE` | `https://api.x.com` | Override for testing |
+The proxy reads exactly two env vars. **Everything else lives in
+`app.config.json`** so secrets stay out of the file and operational config
+stays out of the environment.
 
-`SIGHUP` reloads `throttle.config.json` without restarting.
+| Var | Required | Default | Purpose |
+|---|---|---|---|
+| `X_BEARER_TOKEN` | yes | — | App-only bearer for `api.x.com` (the only secret) |
+| `XCACHE_CONFIG`  | no  | `./app.config.json` | Path to the JSON config file |
+
+### Config file (`app.config.json`)
+
+```jsonc
+{
+  "version": 1,
+
+  "server": {
+    "host": "127.0.0.1",      // bind to 0.0.0.0 for LAN-accessible deployments
+    "port": 8787,
+    "http":  { "enabled": true },
+    "stdio": { "enabled": true } // set to false on networked deployments
+  },
+
+  "storage": {
+    "root": "~/.openclaw/xcache-mcp"  // SQLite + logs directory
+  },
+
+  "x_api": {
+    "base": "https://api.x.com"        // overrideable for testing
+  },
+
+  "logging": {
+    "level":  "info",  // Fastify / pino level (stderr only)
+    "events": true,    // append one JSONL line per request to events/<date>.jsonl
+    "bodies": true     // also log full upstream response bodies to bodies/<date>.jsonl
+  },
+
+  "tools": {
+    // Default exposes only the two ★ monitoring tools. Set to "*" to enable
+    // all 7, or list explicit names to enable a subset.
+    "enabled": ["x_posts_since", "x_follows_changes_since"]
+  },
+
+  "throttle": {
+    "default_min_interval": "24h",
+    "operations": {
+      "get_user_following":   "24h",
+      "get_latest_posts":     "1h",
+      "get_user_by_username": "7d",
+      "get_user_by_id":       "7d",
+      "get_tweet":            "never",
+      "verify_posts":         "7d",
+      "raw_get":              "24h"
+    },
+    "error_retry_intervals": {
+      "401": "never",  "403": "never",
+      "404": "1h",     "429": "1h",
+      "5xx": "5m",
+      "network": "1m"
+    }
+  }
+}
+```
+
+Time strings: `Ns | Nm | Nh | Nd`. `"never"` means once cached, never refresh.
+`"always"` means no throttle. `error_retry_intervals` controls how long the
+gate stays closed after an upstream failure — typically much shorter than the
+success interval so transient outages can recover, but long enough to prevent
+retry storms.
+
+`SIGHUP` reloads `app.config.json` in place; `tools.enabled` changes propagate
+to in-flight MCP servers immediately. Server-level fields (`host`, `port`,
+`http.enabled`, `stdio.enabled`, `logging.level`) require a process restart.
 
 `SIGTERM`/`SIGINT` triggers a clean shutdown that drains the log queue with a
 5-second deadline before exit.
-
-### Throttle config
-
-`throttle.config.json` controls how often each operation can call upstream.
-Time strings: `Ns | Nm | Nh | Nd`. `"never"` means once cached, never
-refresh. `"always"` means no throttle. `error_retry_intervals` controls how
-long the gate stays closed after an upstream failure — typically much shorter
-than the success interval so transient outages can recover, but long enough to
-prevent retry storms.
-
-Default values:
-
-| Operation | Interval |
-|---|---|
-| `get_user_following` | 24h |
-| `get_latest_posts` | 1h |
-| `get_user_by_username` | 7d |
-| `get_user_by_id` | 7d |
-| `get_tweet` | never (once cached) |
-| `verify_posts` | 7d |
-| `raw_get` | 24h |
 
 ## OpenClaw integration
 
@@ -103,6 +142,19 @@ stderr.
 
 Add to OpenClaw's MCP config:
 
+For local subprocess use, write a config file that disables HTTP and keeps
+stdio enabled:
+
+```jsonc
+// ~/openclaw/xcache.app.config.json — minimal subprocess-mode config
+{
+  "version": 1,
+  "server": { "http": { "enabled": false }, "stdio": { "enabled": true } },
+  "tools":  { "enabled": "*" },
+  "throttle": { "default_min_interval": "24h", "operations": {}, "error_retry_intervals": {} }
+}
+```
+
 ```json
 {
   "mcpServers": {
@@ -111,15 +163,12 @@ Add to OpenClaw's MCP config:
       "args": ["/path/to/xcache-mcp/dist/src/index.js"],
       "env": {
         "X_BEARER_TOKEN": "...",
-        "XCACHE_NO_HTTP": "1"
+        "XCACHE_CONFIG": "/home/you/openclaw/xcache.app.config.json"
       }
     }
   }
 }
 ```
-
-`XCACHE_NO_HTTP=1` keeps the process strictly stdio-only when used as a
-subprocess. Omit it if you also want the REST mirror running.
 
 ### MCP via HTTP (Streamable, stateless)
 
@@ -157,7 +206,10 @@ Logs live in `$XCACHE_ROOT/logs/`:
 - `events/YYYY-MM-DD.jsonl` — one JSON line per request (cache lookup or
   upstream call). Metadata only, no body.
 - `bodies/YYYY-MM-DD.jsonl` — one JSON line per upstream call,
-  `{request_id, body}`. Disabled via `XCACHE_LOG_BODIES=0`.
+  `{request_id, body}`. Disabled via `logging.bodies: false` in
+  `app.config.json`. The events JSONL itself can be disabled with
+  `logging.events: false` for very high-throughput deployments where you
+  only want body archives.
 
 Files older than 7 days are gzipped to `*.jsonl.gz`. Mode `0600`. The bearer
 token is **redacted at source** before any row enters the log queue — verify

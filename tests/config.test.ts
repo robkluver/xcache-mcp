@@ -6,9 +6,13 @@ import * as path from "node:path";
 import {
   parseInterval,
   expandHome,
-  loadThrottleConfig,
+  loadAppFileConfig,
+  resolveToolsFromFile,
   intervalForOperation,
   intervalForError,
+  ALL_TOOL_NAMES,
+  DEFAULT_ENABLED_TOOLS,
+  getFileEnabledTools,
 } from "../src/config.ts";
 
 describe("parseInterval", () => {
@@ -66,22 +70,26 @@ describe("expandHome", () => {
   });
 });
 
-describe("loadThrottleConfig", () => {
-  let tmpFile: string;
+function writeTmpConfig(body: object): string {
+  const f = path.join(os.tmpdir(), `app-cfg-${Date.now()}-${Math.random()}.json`);
+  fs.writeFileSync(f, JSON.stringify(body));
+  return f;
+}
 
-  test("loads valid config and exposes intervals", () => {
-    tmpFile = path.join(os.tmpdir(), `throttle-cfg-${Date.now()}-${Math.random()}.json`);
-    fs.writeFileSync(
-      tmpFile,
-      JSON.stringify({
-        version: 1,
+describe("loadAppFileConfig", () => {
+  test("loads valid full config and exposes intervals", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      tools: { enabled: ["x_posts_since"] },
+      throttle: {
         default_min_interval: "1h",
         operations: { foo: "30s", bar: "never", baz: "always" },
         error_retry_intervals: { "404": "5m", "5xx": "1m", "401": "never", network: "30s" },
-      }),
-    );
-    const cfg = loadThrottleConfig(tmpFile);
-    assert.equal(cfg.default_min_interval, "1h");
+      },
+    });
+    const cfg = loadAppFileConfig(f);
+    assert.equal(cfg.version, 1);
+    assert.equal(cfg.throttle.default_min_interval, "1h");
 
     assert.equal(intervalForOperation("foo"), 30_000);
     assert.equal(intervalForOperation("bar"), "never");
@@ -94,28 +102,148 @@ describe("loadThrottleConfig", () => {
     assert.equal(intervalForError(500), 60_000);
     assert.equal(intervalForError("network"), 30_000);
 
-    fs.unlinkSync(tmpFile);
-  });
-
-  test("throws on invalid interval string in operations", () => {
-    const f = path.join(os.tmpdir(), `bad-cfg-${Date.now()}-${Math.random()}.json`);
-    fs.writeFileSync(
-      f,
-      JSON.stringify({
-        version: 1,
-        default_min_interval: "1h",
-        operations: { foo: "garbage" },
-        error_retry_intervals: {},
-      }),
-    );
-    assert.throws(() => loadThrottleConfig(f));
     fs.unlinkSync(f);
   });
 
-  test("throws on missing default_min_interval", () => {
-    const f = path.join(os.tmpdir(), `bad2-cfg-${Date.now()}-${Math.random()}.json`);
-    fs.writeFileSync(f, JSON.stringify({ version: 1, operations: {}, error_retry_intervals: {} }));
-    assert.throws(() => loadThrottleConfig(f));
+  test("loads config with optional sections (server, storage, x_api, logging)", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      server: { host: "0.0.0.0", port: 9999, http: { enabled: false }, stdio: { enabled: false } },
+      storage: { root: "/tmp/xcache-test-root" },
+      x_api: { base: "http://localhost:1234" },
+      logging: { level: "debug", events: false, bodies: false },
+      throttle: {
+        default_min_interval: "1h",
+        operations: {},
+        error_retry_intervals: {},
+      },
+    });
+    const cfg = loadAppFileConfig(f);
+    assert.equal(cfg.server?.host, "0.0.0.0");
+    assert.equal(cfg.server?.port, 9999);
+    assert.equal(cfg.server?.http?.enabled, false);
+    assert.equal(cfg.server?.stdio?.enabled, false);
+    assert.equal(cfg.storage?.root, "/tmp/xcache-test-root");
+    assert.equal(cfg.x_api?.base, "http://localhost:1234");
+    assert.equal(cfg.logging?.level, "debug");
+    assert.equal(cfg.logging?.events, false);
+    assert.equal(cfg.logging?.bodies, false);
+    fs.unlinkSync(f);
+  });
+
+  test("throws on missing version", () => {
+    const f = writeTmpConfig({
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    assert.throws(() => loadAppFileConfig(f));
+    fs.unlinkSync(f);
+  });
+
+  test("throws on missing throttle section", () => {
+    const f = writeTmpConfig({ version: 1 });
+    assert.throws(() => loadAppFileConfig(f));
+    fs.unlinkSync(f);
+  });
+
+  test("throws on missing throttle.default_min_interval", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      throttle: { operations: {}, error_retry_intervals: {} },
+    });
+    assert.throws(() => loadAppFileConfig(f));
+    fs.unlinkSync(f);
+  });
+
+  test("throws on invalid interval string in operations", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      throttle: {
+        default_min_interval: "1h",
+        operations: { foo: "garbage" },
+        error_retry_intervals: {},
+      },
+    });
+    assert.throws(() => loadAppFileConfig(f));
+    fs.unlinkSync(f);
+  });
+});
+
+describe("resolveToolsFromFile", () => {
+  test("undefined section → default starred set", () => {
+    assert.deepEqual(
+      [...resolveToolsFromFile(undefined)].sort(),
+      [...DEFAULT_ENABLED_TOOLS].sort(),
+    );
+  });
+  test("absent enabled key → default starred set", () => {
+    assert.deepEqual([...resolveToolsFromFile({})].sort(), [...DEFAULT_ENABLED_TOOLS].sort());
+  });
+  test('"*" → all 7 tools', () => {
+    assert.deepEqual(
+      [...resolveToolsFromFile({ enabled: "*" })].sort(),
+      [...ALL_TOOL_NAMES].sort(),
+    );
+  });
+  test("explicit list", () => {
+    const r = resolveToolsFromFile({ enabled: ["x_posts_since", "x_get_tweet"] });
+    assert.deepEqual([...r].sort(), ["x_get_tweet", "x_posts_since"]);
+  });
+  test("empty list → empty set (explicitly disable all)", () => {
+    assert.equal(resolveToolsFromFile({ enabled: [] }).size, 0);
+  });
+  test("non-array, non-* throws", () => {
+    assert.throws(() => resolveToolsFromFile({ enabled: "x_get_tweet" as unknown as string[] }));
+  });
+  test("non-string entries throw", () => {
+    assert.throws(() => resolveToolsFromFile({ enabled: [42 as unknown as string] }));
+  });
+  test("unknown names are dropped (with warning to stderr)", () => {
+    const orig = process.stderr.write.bind(process.stderr);
+    let captured = "";
+    process.stderr.write = ((c: string | Uint8Array) => {
+      captured += c.toString();
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const r = resolveToolsFromFile({ enabled: ["x_posts_since", "bogus"] });
+      assert.deepEqual([...r], ["x_posts_since"]);
+      assert.ok(captured.includes('"bogus"'));
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+});
+
+describe("loadAppFileConfig + tools section integration", () => {
+  test("file with tools.enabled list updates getFileEnabledTools()", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      tools: { enabled: ["x_get_tweet", "x_raw_get"] },
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    loadAppFileConfig(f);
+    assert.deepEqual([...getFileEnabledTools()].sort(), ["x_get_tweet", "x_raw_get"]);
+    fs.unlinkSync(f);
+  });
+
+  test("file with tools section absent uses default starred set", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    loadAppFileConfig(f);
+    assert.deepEqual([...getFileEnabledTools()].sort(), [...DEFAULT_ENABLED_TOOLS].sort());
+    fs.unlinkSync(f);
+  });
+
+  test('file with tools.enabled = "*" enables all 7', () => {
+    const f = writeTmpConfig({
+      version: 1,
+      tools: { enabled: "*" },
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    loadAppFileConfig(f);
+    assert.deepEqual([...getFileEnabledTools()].sort(), [...ALL_TOOL_NAMES].sort());
     fs.unlinkSync(f);
   });
 });

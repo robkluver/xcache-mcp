@@ -9,7 +9,7 @@ Feature: Offline log consolidation into a Markdown summary
   #   npx xcache-mcp consolidate --since 7d --output report.md
   #   npx xcache-mcp-consolidate --from 2026-04-29 --to 2026-05-05 --output report.md
   #   npm run consolidate -- --since 1d --output report.md
-  # Reads from $XCACHE_ROOT/logs/events/*.jsonl[.gz] by default.
+  # Reads from $STORAGE_ROOT/logs/events/*.jsonl[.gz] by default.
 
   # ---------- Window resolution ----------
 

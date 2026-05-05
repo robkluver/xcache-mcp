@@ -78,6 +78,7 @@ export class LogWriter {
   constructor(
     private logsDir: string,
     private logBodies: boolean,
+    private logEvents: boolean = true,
   ) {}
 
   start(): void {
@@ -103,6 +104,7 @@ export class LogWriter {
 
   enqueueEvent(entry: EventLogEntry): void {
     if (this.stopped) return;
+    if (!this.logEvents) return;
     const r = this.queue.push({ kind: "event", entry });
     if (r === "dropped") {
       try {
@@ -247,9 +249,13 @@ export function todayUtc(): string {
 
 let writer: LogWriter | null = null;
 
-export function initLogWriter(logsDir: string, logBodies: boolean): LogWriter {
+export function initLogWriter(
+  logsDir: string,
+  logBodies: boolean,
+  logEvents: boolean = true,
+): LogWriter {
   if (writer) return writer;
-  writer = new LogWriter(logsDir, logBodies);
+  writer = new LogWriter(logsDir, logBodies, logEvents);
   writer.start();
   return writer;
 }

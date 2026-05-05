@@ -23,17 +23,17 @@ Feature: Process lifecycle (startup, signals, shutdown)
     And no banner contamination appears on stdout (which is reserved for MCP)
 
   Scenario: HTTP listener binds and announces its address on stderr
-    Given XCACHE_NO_HTTP is not set
+    Given server.http.enabled is true
     When the proxy boots
     Then "[xcache-mcp] HTTP listening on <host>:<port>" appears on stderr
 
   Scenario: stdio transport announces itself on stderr
-    Given XCACHE_NO_STDIO is not set
+    Given server.stdio.enabled is true
     When the proxy boots
     Then "[xcache-mcp] MCP stdio transport connected" appears on stderr
 
   Scenario: Both transports may be active simultaneously
-    Given neither XCACHE_NO_HTTP nor XCACHE_NO_STDIO is set
+    Given both server.http.enabled and server.stdio.enabled are true
     When the proxy boots
     Then both the HTTP listener and the stdio transport are active
 

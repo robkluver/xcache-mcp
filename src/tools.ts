@@ -72,6 +72,11 @@ export type ToolDef = {
   };
 };
 
+/** Filter the full TOOL_DEFINITIONS catalog to only the enabled subset. */
+export function enabledToolDefinitions(enabled: Set<string>): ToolDef[] {
+  return TOOL_DEFINITIONS.filter((t) => enabled.has(t.name));
+}
+
 export const TOOL_DEFINITIONS: ToolDef[] = [
   {
     name: "x_get_user_by_username",
@@ -1644,7 +1649,15 @@ export async function dispatchTool(
   call: ToolCallContext,
   name: string,
   args: unknown,
+  enabled: Set<string>,
 ): Promise<unknown> {
+  if (!enabled.has(name)) {
+    return {
+      error: "tool_disabled",
+      tool: name,
+      message: `Tool "${name}" is disabled in this proxy. Set XCACHE_ENABLED_TOOLS to include it (or "*" for all).`,
+    };
+  }
   switch (name) {
     case "x_get_user_by_username":
       return await tool_x_get_user_by_username(call, args as any);

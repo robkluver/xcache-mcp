@@ -7,17 +7,17 @@ Feature: JSONL event and body logging
 
   Background:
     Given the proxy is running with X_BEARER_TOKEN set
-    And XCACHE_LOG_BODIES is set to "1" unless otherwise stated
+    And app.config.json logging.bodies is true unless otherwise stated
 
   # ---------- File layout and rotation ----------
 
   Scenario: Events log lives at events/<UTC-date>.jsonl
     When the proxy logs at any point during the UTC day "2026-05-05"
-    Then the file path is "<XCACHE_ROOT>/logs/events/2026-05-05.jsonl"
+    Then the file path is "<storage.root>/logs/events/2026-05-05.jsonl"
 
   Scenario: Bodies log lives at bodies/<UTC-date>.jsonl
-    When XCACHE_LOG_BODIES=1 and a live upstream call is logged
-    Then a body line is appended to "<XCACHE_ROOT>/logs/bodies/<UTC-date>.jsonl"
+    When logging.bodies=true and a live upstream call is logged
+    Then a body line is appended to "<storage.root>/logs/bodies/<UTC-date>.jsonl"
 
   Scenario: Daily rotation occurs at UTC midnight by filename
     Given an event is logged at 2026-05-05T23:59:59Z
@@ -115,14 +115,14 @@ Feature: JSONL event and body logging
       | gate_blocked | gate_blocked  |
       | error        | miss          |
 
-  Scenario: body_ref is null when XCACHE_LOG_BODIES=0
-    Given XCACHE_LOG_BODIES is set to "0"
+  Scenario: body_ref is null when logging.bodies=false
+    Given app.config.json logging.bodies is false
     When a live upstream call is logged
     Then the event entry's body_ref is null
     And no bodies/<date>.jsonl file is created
 
-  Scenario: body_ref is "bodies/<UTC-date>.jsonl" when XCACHE_LOG_BODIES=1
-    Given XCACHE_LOG_BODIES is set to "1"
+  Scenario: body_ref is "bodies/<UTC-date>.jsonl" when logging.bodies=true
+    Given app.config.json logging.bodies is true
     When a live upstream call is logged
     Then the event entry's body_ref is "bodies/<UTC-date>.jsonl"
     And the body itself is enqueued to that file as {"request_id": ..., "body": ...}

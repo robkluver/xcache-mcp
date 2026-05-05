@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { openDb, closeDb, getDb } from "../src/cache.ts";
-import { loadThrottleConfig } from "../src/config.ts";
+import { loadAppFileConfig } from "../src/config.ts";
 import {
   gateState,
   writeGateSuccess,
@@ -15,32 +15,34 @@ import {
 } from "../src/gate.ts";
 
 let dbPath: string;
-let throttlePath: string;
+let configPath: string;
 
 before(() => {
   dbPath = path.join(os.tmpdir(), `xcache-gate-test-${Date.now()}-${Math.random()}.db`);
   openDb(dbPath);
-  throttlePath = path.join(os.tmpdir(), `throttle-gate-${Date.now()}-${Math.random()}.json`);
+  configPath = path.join(os.tmpdir(), `app-config-gate-${Date.now()}-${Math.random()}.json`);
   fs.writeFileSync(
-    throttlePath,
+    configPath,
     JSON.stringify({
       version: 1,
-      default_min_interval: "1h",
-      operations: {
-        op_short: "30s",
-        op_long: "1d",
-        op_never: "never",
-        op_always: "always",
-      },
-      error_retry_intervals: {
-        "404": "10m",
-        "5xx": "1m",
-        "401": "never",
-        network: "30s",
+      throttle: {
+        default_min_interval: "1h",
+        operations: {
+          op_short: "30s",
+          op_long: "1d",
+          op_never: "never",
+          op_always: "always",
+        },
+        error_retry_intervals: {
+          "404": "10m",
+          "5xx": "1m",
+          "401": "never",
+          network: "30s",
+        },
       },
     }),
   );
-  loadThrottleConfig(throttlePath);
+  loadAppFileConfig(configPath);
 });
 
 after(() => {
@@ -53,7 +55,7 @@ after(() => {
     }
   }
   try {
-    fs.unlinkSync(throttlePath);
+    fs.unlinkSync(configPath);
   } catch {
     /* ignore */
   }
