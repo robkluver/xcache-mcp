@@ -247,3 +247,26 @@ describe("loadAppFileConfig + tools section integration", () => {
     fs.unlinkSync(f);
   });
 });
+
+describe("x_api.earliest_data_iso", () => {
+  test("absent → preserved as undefined on the file model", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    const cfg = loadAppFileConfig(f);
+    assert.equal(cfg.x_api?.earliest_data_iso, undefined);
+    fs.unlinkSync(f);
+  });
+
+  test("valid ISO 8601 string is accepted", () => {
+    const f = writeTmpConfig({
+      version: 1,
+      x_api: { earliest_data_iso: "2025-01-01T00:00:00Z" },
+      throttle: { default_min_interval: "1h", operations: {}, error_retry_intervals: {} },
+    });
+    const cfg = loadAppFileConfig(f);
+    assert.equal(cfg.x_api?.earliest_data_iso, "2025-01-01T00:00:00Z");
+    fs.unlinkSync(f);
+  });
+});

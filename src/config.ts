@@ -23,6 +23,13 @@ export type StorageConfig = {
 
 export type XApiConfig = {
   base: string;
+  /** Optional ISO 8601 timestamp. The proxy will never ask api.x.com for data
+   *  older than this. For tools that take a time-bounded query parameter
+   *  (e.g. start_time on /2/users/:id/tweets), the value is clamped to
+   *  max(caller's since_iso, earliest_data_iso). For paginated endpoints with
+   *  no time parameter (e.g. /2/users/:id/following), this floor is enforced
+   *  via the early-stop heuristic in x_follows_changes_since. */
+  earliest_data_iso?: string;
 };
 
 export type LoggingConfig = {
@@ -63,6 +70,8 @@ export type AppConfig = {
   stdioEnabled: boolean;
   root: string;
   xApiBase: string;
+  /** ms-since-epoch, or null if unset. Floor for any time-bounded request. */
+  xApiEarliestDataMs: number | null;
   logLevel: string;
   logEvents: boolean;
   logBodies: boolean;
@@ -248,6 +257,16 @@ export function resolveAppConfig(): AppConfig {
   const xApi: XApiConfig = {
     base: (file.x_api?.base ?? DEFAULT_X_API.base).replace(/\/+$/, ""),
   };
+  let xApiEarliestDataMs: number | null = null;
+  if (file.x_api?.earliest_data_iso !== undefined) {
+    const parsed = Date.parse(file.x_api.earliest_data_iso);
+    if (!Number.isFinite(parsed)) {
+      throw new Error(
+        `app config: x_api.earliest_data_iso is not a valid ISO 8601 timestamp: "${file.x_api.earliest_data_iso}"`,
+      );
+    }
+    xApiEarliestDataMs = parsed;
+  }
   const logging: LoggingConfig = {
     level: file.logging?.level ?? DEFAULT_LOGGING.level,
     events: file.logging?.events ?? DEFAULT_LOGGING.events,
@@ -269,6 +288,7 @@ export function resolveAppConfig(): AppConfig {
     stdioEnabled: server.stdio.enabled,
     root: storage.root,
     xApiBase: xApi.base,
+    xApiEarliestDataMs,
     logLevel: logging.level,
     logEvents: logging.events,
     logBodies: logging.bodies,

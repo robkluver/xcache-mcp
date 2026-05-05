@@ -401,6 +401,7 @@ describe("follow snapshots", () => {
       members: ["a", "b", "c"],
       api_calls: 1,
       api_duration_ms: 50,
+      walk_kind: "complete",
       details: [
         { user_id: "a", username: "alice", name: "Alice", description: "x", raw: { id: "a" } },
         { user_id: "b", username: "bob", name: "Bob", description: null, raw: { id: "b" } },
@@ -426,6 +427,7 @@ describe("follow snapshots", () => {
       members: [],
       api_calls: 0,
       api_duration_ms: 0,
+      walk_kind: "complete",
       details: [],
     });
     insertFollowSnapshot({
@@ -434,6 +436,7 @@ describe("follow snapshots", () => {
       members: [],
       api_calls: 0,
       api_duration_ms: 0,
+      walk_kind: "complete",
       details: [],
     });
     insertFollowSnapshot({
@@ -442,6 +445,7 @@ describe("follow snapshots", () => {
       members: [],
       api_calls: 0,
       api_duration_ms: 0,
+      walk_kind: "complete",
       details: [],
     });
     const r = snapshotAtOrBefore("fu2", 2500)!;
@@ -458,6 +462,7 @@ describe("follow snapshots", () => {
       members: ["x"],
       api_calls: 0,
       api_duration_ms: 0,
+      walk_kind: "complete",
       details: [{ user_id: "x", username: "old", name: "Old", raw: {} }],
     });
     insertFollowSnapshot({
@@ -466,6 +471,7 @@ describe("follow snapshots", () => {
       members: ["x"],
       api_calls: 0,
       api_duration_ms: 0,
+      walk_kind: "complete",
       details: [{ user_id: "x", username: "new", name: "New", raw: {} }],
     });
     const dets = getFollowUserDetails(["x"]);
@@ -475,6 +481,31 @@ describe("follow snapshots", () => {
 
   test("getFollowUserDetails empty input → empty output", () => {
     assert.deepEqual(getFollowUserDetails([]), []);
+  });
+
+  test("walk_kind round-trips on the snapshot row", () => {
+    const idC = insertFollowSnapshot({
+      user_id: "wk",
+      taken_at: 100,
+      members: ["a"],
+      api_calls: 1,
+      api_duration_ms: 1,
+      walk_kind: "complete",
+      details: [],
+    });
+    const idP = insertFollowSnapshot({
+      user_id: "wk",
+      taken_at: 200,
+      members: ["a", "b"],
+      api_calls: 1,
+      api_duration_ms: 1,
+      walk_kind: "partial",
+      details: [],
+    });
+    void idC;
+    const row = latestSnapshotForUser("wk")!;
+    assert.equal(row.id, idP);
+    assert.equal(row.walk_kind, "partial");
   });
 });
 

@@ -64,7 +64,13 @@ stays out of the environment.
   },
 
   "x_api": {
-    "base": "https://api.x.com"        // overrideable for testing
+    "base": "https://api.x.com",       // overrideable for testing
+    // Optional ISO 8601 floor on how far back the proxy will ask api.x.com
+    // for data. Time-bounded requests (e.g. start_time on /tweets) are
+    // clamped to this. For paginated endpoints with no time parameter
+    // (e.g. /following), the same intent is enforced via early-stop on
+    // already-cached IDs. Omit for "no floor" (full historical access).
+    "earliest_data_iso": "2025-01-01T00:00:00Z"
   },
 
   "logging": {

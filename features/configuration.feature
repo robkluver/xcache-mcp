@@ -65,6 +65,35 @@ Feature: Configuration loading and reload
     Then the request goes to "http://127.0.0.1:9999/2/..."
     And no requests are made to "https://api.x.com"
 
+  Scenario: x_api.earliest_data_iso clamps time-bounded queries
+    Given app.config.json x_api.earliest_data_iso is "2025-06-01T00:00:00Z"
+    When x_posts_since is called with since_iso "2024-01-01T00:00:00Z" for a user with no cursor yet
+    Then the upstream request's start_time is clamped to "2025-06-01T00:00:00.000Z"
+    And the local response filter still uses the caller's since_iso
+    # Cached older posts (if any) are still returned to the caller; the floor
+    # only governs how far back the proxy is willing to ASK upstream for data.
+
+  Scenario: x_api.earliest_data_iso enforced via early-stop on /following
+    Given app.config.json x_api.earliest_data_iso is set
+    When the agent calls x_follows_changes_since for a user with a prior snapshot
+    Then the proxy walks /2/users/:id/following newest-first
+    And it stops on the first page that contains a known follow (cached ID)
+    And the new snapshot is recorded with walk_kind = "partial"
+    # /following has no time parameter, so the early-stop heuristic is the
+    # functional equivalent of the time floor for that endpoint.
+
+  Scenario Outline: x_api.earliest_data_iso must parse as ISO 8601
+    Given app.config.json x_api.earliest_data_iso is "<spec>"
+    When the proxy attempts to load it
+    Then loading fails with an error
+    And startup is aborted
+
+    Examples:
+      | spec     |
+      | not-iso  |
+      | 2025-13-99 |
+      | yesterday|
+
   Scenario Outline: logging toggles
     Given app.config.json logging.<key> is <value>
     When the proxy logs upstream activity

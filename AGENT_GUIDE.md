@@ -140,10 +140,32 @@ state. You can quote a deleted post — just label it as such using the
 
 ### `precision_note` (on `x_follows_changes_since`)
 
-A short human-readable string explaining a known imprecision: snapshot
-cadence means the baseline may slightly precede `since_iso`, so
-`new_follows` may include accounts followed shortly before the requested
-cutoff. Read it; surface it if precision matters to the end user.
+A short human-readable string explaining the known imprecisions of this
+tool. Two things to know:
+
+1. **Snapshot cadence over-inclusion.** The baseline may slightly precede
+   `since_iso`, so `new_follows` may include accounts followed shortly
+   before the requested cutoff. Surface this if the cutoff is critical.
+2. **Partial walks under-detect unfollows.** The proxy walks
+   `/2/users/:id/following` newest-first and stops paginating once it hits
+   accounts already cached. This makes repeated calls cheap, but it also
+   means: **if someone in your previous snapshot has since unfollowed and
+   was past the early-stop cutoff, the proxy will keep reporting them as
+   followed.** `new_follows` is reliable; `unfollows` is best-effort.
+
+### `latest_walk_kind` and `unfollows_may_be_stale` (on `x_follows_changes_since`)
+
+- `latest_walk_kind` = `"complete"` → the most recent snapshot was a full
+  walk. Both `new_follows` and `unfollows` are authoritative.
+- `latest_walk_kind` = `"partial"` → the most recent snapshot stopped early
+  on a cached ID. `new_follows` is still authoritative. `unfollows` may be
+  missing accounts that were unfollowed past the early-stop point. The
+  flag `unfollows_may_be_stale: true` is set in this case.
+
+If you genuinely need an authoritative answer about who someone has
+unfollowed (rare — most agent use cases only care about *new* follows),
+call `x_follows_changes_since` with `force_refresh: true`. That bypasses
+the throttle gate AND walks to completion. Expensive; do it sparingly.
 
 ### `truncated` (on `x_posts_since`)
 
@@ -243,12 +265,14 @@ field-expansion syntax: comma-separated names (e.g.
 {
   "new_follows":   [{ "user_id": "111", "username": "alice", "name": "Alice" }],
   "unfollows":     [{ "user_id": "222", "username": "bob",   "name": "Bob"   }],
-  "baseline_snapshot_at": "2026-04-28T03:00:00.000Z",
-  "latest_snapshot_at":   "2026-05-05T03:00:00.000Z",
-  "since_iso_requested":  "2026-04-28T00:00:00Z",
-  "first_observation": false,
-  "touched_upstream": true,
-  "precision_note": "Snapshots are taken on the get_user_following throttle cadence...",
+  "baseline_snapshot_at":  "2026-04-28T03:00:00.000Z",
+  "latest_snapshot_at":    "2026-05-05T03:00:00.000Z",
+  "latest_walk_kind":      "partial",        // or "complete"
+  "unfollows_may_be_stale": true,            // true when latest_walk_kind === "partial"
+  "since_iso_requested":   "2026-04-28T00:00:00Z",
+  "first_observation":     false,
+  "touched_upstream":      true,
+  "precision_note":        "Snapshots are taken on the get_user_following throttle cadence...",
   "gate": { "last_fetched_at": "...", "next_eligible_at": "..." }
 }
 ```

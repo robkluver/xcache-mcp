@@ -81,6 +81,44 @@ Feature: Tool x_follows_changes_since (★ preferred for monitoring follow-list 
     And it explains that the baseline snapshot may be from before since_iso
     And it acknowledges that new_follows can over-include accounts followed slightly before the cutoff
 
+  # ---------- Early-stop walk (cost optimization) ----------
+
+  Scenario: First observation walks to completion (nothing to early-stop on)
+    Given there are no prior snapshots for the user
+    When the agent calls x_follows_changes_since
+    Then the proxy walks /2/users/:id/following until next_token is absent (or MAX_PAGES)
+    And the resulting snapshot's walk_kind is "complete"
+    And response.latest_walk_kind is "complete"
+    And response.unfollows_may_be_stale is false
+
+  Scenario: Subsequent walk stops on the first page that hits a known follow
+    Given a previous snapshot for the user has members {A, B, C, D}
+    And X returns followings newest-first
+    When the agent calls x_follows_changes_since
+    And page 1 contains user IDs {F, E, A, X}
+    Then the walk stops after page 1 (early-stop on A)
+    And the new snapshot's walk_kind is "partial"
+    And the new snapshot's members include {A, B, C, D, F, E, X} (prior augmented with this walk)
+    And response.latest_walk_kind is "partial"
+    And response.unfollows_may_be_stale is true
+
+  Scenario: Partial walks under-detect unfollows by design
+    Given a previous snapshot has members {A, B, C, D}
+    And user has actually unfollowed D and followed E
+    When the agent calls x_follows_changes_since (early-stop hits A on page 1)
+    Then response.new_follows includes E (correctly detected)
+    But response.unfollows does NOT include D (we never observed D's absence past the early-stop)
+    And response.unfollows_may_be_stale is true to flag this limitation
+
+  Scenario: force_refresh disables early-stop and walks to completion
+    Given a previous snapshot exists for the user
+    When the agent calls x_follows_changes_since with {"force_refresh": true}
+    Then the proxy bypasses the throttle gate
+    And it ignores the early-stop heuristic
+    And it walks /2/users/:id/following to its end (or MAX_PAGES)
+    And the new snapshot's walk_kind is "complete"
+    And response.unfollows is authoritative
+
   # ---------- Pagination safety ----------
 
   Scenario: Defensive page cap of 100 prevents runaway pagination
@@ -100,15 +138,17 @@ Feature: Tool x_follows_changes_since (★ preferred for monitoring follow-list 
   Scenario: Response includes the standard fields
     When the agent receives any response
     Then it has the fields:
-      | new_follows           |
-      | unfollows             |
-      | baseline_snapshot_at  |
-      | latest_snapshot_at    |
-      | since_iso_requested   |
-      | first_observation     |
-      | touched_upstream      |
-      | precision_note        |
-      | gate                  |
+      | new_follows             |
+      | unfollows               |
+      | baseline_snapshot_at    |
+      | latest_snapshot_at      |
+      | latest_walk_kind        |
+      | unfollows_may_be_stale  |
+      | since_iso_requested     |
+      | first_observation       |
+      | touched_upstream        |
+      | precision_note          |
+      | gate                    |
 
   # ---------- Errors ----------
 

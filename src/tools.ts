@@ -34,11 +34,13 @@ import { getLogWriter, type EventLogEntry } from "./log.js";
 import { intervalForError, type AppConfig } from "./config.js";
 import * as crypto from "node:crypto";
 
-/** Shared call context (token, base URL, log flags). Set once at startup. */
+/** Shared call context (token, base URL, log flags, time floor).
+ *  Set once at startup by initToolContext(). */
 let appCtx: {
   bearerToken: string;
   apiBase: string;
   logBodies: boolean;
+  xApiEarliestDataMs: number | null;
 } | null = null;
 
 export function initToolContext(cfg: AppConfig): void {
@@ -46,10 +48,16 @@ export function initToolContext(cfg: AppConfig): void {
     bearerToken: cfg.bearerToken,
     apiBase: cfg.xApiBase,
     logBodies: cfg.logBodies,
+    xApiEarliestDataMs: cfg.xApiEarliestDataMs,
   };
 }
 
-function ctx(): { bearerToken: string; apiBase: string; logBodies: boolean } {
+function ctx(): {
+  bearerToken: string;
+  apiBase: string;
+  logBodies: boolean;
+  xApiEarliestDataMs: number | null;
+} {
   if (!appCtx) throw new Error("Tool context not initialized");
   return appCtx;
 }
@@ -180,6 +188,7 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
     description:
       "★ Preferred tool for monitoring follow-list changes over time. Compares the current /2/users/:id/following list against the most recent snapshot taken on or before since_iso, returning new_follows and unfollows. Snapshots are taken append-only and stored forever. Throttled per the get_user_following operation (default 24h). " +
       "Do NOT use x_raw_get to walk /2/users/:id/following directly — use this tool, which snapshots and diffs efficiently. " +
+      "Walks newest-first and stops paginating once it hits accounts already cached, so subsequent calls are cheap. The trade-off (intentional): unfollows is best-effort and may miss accounts unfollowed past the early-stop cutoff — when that matters, see unfollows_may_be_stale in the response or pass force_refresh: true to force an authoritative full walk. " +
       "Note: precision is bounded by snapshot cadence (the baseline may be slightly older than since_iso); see precision_note in the response.",
     inputSchema: {
       type: "object",
@@ -953,7 +962,12 @@ export async function tool_x_posts_since(
     if (cursor?.latest_tweet_id_seen) {
       baseParams.since_id = cursor.latest_tweet_id_seen;
     } else {
-      baseParams.start_time = new Date(sinceMs).toISOString();
+      // Clamp to the configured global floor on how old we'll ask X for data.
+      // The local filter still uses the caller's since_iso as-is so cached
+      // older posts (if any) are still returned.
+      const floor = appCtx?.xApiEarliestDataMs ?? null;
+      const effectiveStartMs = floor !== null ? Math.max(sinceMs, floor) : sinceMs;
+      baseParams.start_time = new Date(effectiveStartMs).toISOString();
     }
 
     let nextToken: string | undefined = undefined;
@@ -1253,10 +1267,21 @@ export async function tool_x_follows_changes_since(
   const followingPath = `/2/users/${encodeURIComponent(user_id)}/following`;
   const paginationChainId = crypto.randomUUID();
 
+  // Early-stop fuel: members of the most recent snapshot for this user. If
+  // any page of the upcoming /following walk contains one of these IDs, we
+  // assume X returns followings newest-first and stop walking — there's
+  // nothing newer than what we already know past this point. force_refresh
+  // disables the early-stop so callers can audit unfollows accurately.
+  const priorMembers: Set<string> | null =
+    existingLatest && input.force_refresh !== true
+      ? new Set(snapshotMemberIds(existingLatest.id))
+      : null;
+
   if (shouldFetch) {
     touched_upstream = true;
     const t0 = Date.now();
     let nextToken: string | undefined = undefined;
+    const observedThisWalk = new Set<string>();
     const members: string[] = [];
     const details: Array<{
       user_id: string;
@@ -1269,6 +1294,7 @@ export async function tool_x_follows_changes_since(
     let depth = 0;
     const MAX_PAGES = 100;
     let errored = false;
+    let earlyStopHit = false;
     while (depth < MAX_PAGES) {
       const params: Record<string, string | number | boolean | undefined> = {
         max_results: 1000,
@@ -1323,15 +1349,23 @@ export async function tool_x_follows_changes_since(
         meta?: { result_count?: number; next_token?: string };
       } | null;
       const data = json?.data ?? [];
+      let pageHasKnown = false;
       for (const u of data) {
-        members.push(String(u.id));
-        details.push({
-          user_id: String(u.id),
-          username: u.username ?? null,
-          name: u.name ?? null,
-          description: u.description ?? null,
-          raw: u,
-        });
+        const id = String(u.id);
+        if (!observedThisWalk.has(id)) {
+          observedThisWalk.add(id);
+          members.push(id);
+          details.push({
+            user_id: id,
+            username: u.username ?? null,
+            name: u.name ?? null,
+            description: u.description ?? null,
+            raw: u,
+          });
+        }
+        if (priorMembers !== null && priorMembers.has(id)) {
+          pageHasKnown = true;
+        }
       }
       logEvent({
         call,
@@ -1362,6 +1396,13 @@ export async function tool_x_follows_changes_since(
         body_ref: bodyRef(),
         body: res.body,
       });
+      if (pageHasKnown) {
+        // We've reached followings we already had on file. The remaining
+        // (older) pages are assumed unchanged. Stop here and mark this walk
+        // as partial.
+        earlyStopHit = true;
+        break;
+      }
       if (json?.meta?.next_token) {
         nextToken = json.meta.next_token;
         depth += 1;
@@ -1371,12 +1412,24 @@ export async function tool_x_follows_changes_since(
     }
     if (!errored) {
       const taken_at = Date.now();
+      const walkKind: "complete" | "partial" = earlyStopHit ? "partial" : "complete";
+
+      // For partial walks, augment the snapshot's member list with the prior
+      // snapshot's members so we don't lose anyone we didn't re-observe. The
+      // trade-off (intentional): unfollows go undetected for accounts past
+      // the early-stop cutoff. Documented in precision_note + AGENT_GUIDE.
+      const finalMembers: string[] =
+        walkKind === "partial" && priorMembers
+          ? Array.from(new Set([...priorMembers, ...members]))
+          : members;
+
       insertFollowSnapshot({
         user_id,
         taken_at,
-        members,
+        members: finalMembers,
         api_calls,
         api_duration_ms: Date.now() - t0,
+        walk_kind: walkKind,
         details,
       });
       writeGateSuccess({ operation, account_id, status: 200 });
@@ -1420,6 +1473,8 @@ export async function tool_x_follows_changes_since(
       unfollows: [],
       baseline_snapshot_at: null,
       latest_snapshot_at: null,
+      latest_walk_kind: null,
+      unfollows_may_be_stale: false,
       since_iso_requested: input.since_iso,
       first_observation: true,
       touched_upstream,
@@ -1459,16 +1514,28 @@ export async function tool_x_follows_changes_since(
     };
   };
 
+  const latestWalkKind = latest.walk_kind ?? "complete";
+  const unfollowsMayBeStale = latestWalkKind === "partial";
+  const precisionNotes: string[] = [
+    "Snapshots are taken on the get_user_following throttle cadence, not at arbitrary moments. The baseline snapshot may be from before since_iso, so new_follows can include accounts followed slightly before the requested cutoff. This over-inclusion is by design.",
+  ];
+  if (unfollowsMayBeStale) {
+    precisionNotes.push(
+      "The latest snapshot is a PARTIAL walk: the proxy stopped paginating /2/users/:id/following once it hit accounts already cached. new_follows is reliable; unfollows is best-effort and may MISS accounts that were unfollowed past the early-stop cutoff (so the proxy may continue to report them as followed). Call with force_refresh: true for an authoritative full walk.",
+    );
+  }
+
   return {
     new_follows: newFollowIds.map(toFollowDetail),
     unfollows: unfollowIds.map(toFollowDetail),
     baseline_snapshot_at: baseline ? new Date(baseline.taken_at).toISOString() : null,
     latest_snapshot_at: new Date(latest.taken_at).toISOString(),
+    latest_walk_kind: latestWalkKind,
+    unfollows_may_be_stale: unfollowsMayBeStale,
     since_iso_requested: input.since_iso,
     first_observation: !baseline,
     touched_upstream,
-    precision_note:
-      "Snapshots are taken on the get_user_following throttle cadence, not at arbitrary moments. The baseline snapshot may be from before since_iso, so new_follows can include accounts followed slightly before the requested cutoff. This over-inclusion is by design.",
+    precision_note: precisionNotes.join(" "),
     gate: {
       last_fetched_at: lastFetchedIso(operation, account_id) ?? "",
       next_eligible_at: nextEligibleIso(operation, account_id) ?? "",
