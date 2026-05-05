@@ -134,19 +134,73 @@ agent toward the higher-level monitoring tools when appropriate.
 | `x_follows_changes_since` ★ | Preferred: detect new follows / unfollows over time via append-only snapshots |
 | `x_verify_posts` | Expensive: verify which cached posts are still live upstream |
 
-### MCP via stdio (recommended for OpenClaw)
+### Network deployment (proxy on a separate machine, primary use case)
 
-OpenClaw spawns the proxy as a subprocess and talks to it over stdio. Since
-stdout is the MCP protocol channel, all human-readable diagnostics go to
-stderr.
+The proxy is designed to run as a long-lived service on its own host
+(physical box, VM, container, or Raspberry Pi). OpenClaw and any other MCP
+clients live elsewhere on the LAN and talk to it over HTTP. The agent host
+never spawns the proxy and never reads anything from its stdout.
 
-Add to OpenClaw's MCP config:
-
-For local subprocess use, write a config file that disables HTTP and keeps
-stdio enabled:
+On the proxy host, edit `app.config.json` to bind the listener to a
+LAN-reachable address:
 
 ```jsonc
-// ~/openclaw/xcache.app.config.json — minimal subprocess-mode config
+"server": {
+  "host": "0.0.0.0",        // or a specific LAN IP
+  "port": 8787,
+  "http":  { "enabled": true },
+  "stdio": { "enabled": false }   // unused on a server deployment
+}
+```
+
+Then start the proxy as you would any service:
+
+```bash
+X_BEARER_TOKEN=... node /opt/xcache-mcp/dist/src/index.js
+```
+
+On startup the proxy prints a banner to stderr showing the resolved paths,
+which is what your service manager (systemd, launchd, supervisord) will
+capture in its log:
+
+```
+[xcache-mcp] xcache-mcp v0.1.0
+[xcache-mcp] config:  /etc/xcache-mcp/app.config.json
+[xcache-mcp] storage: /var/lib/xcache-mcp
+[xcache-mcp] db:      /var/lib/xcache-mcp/data.db
+[xcache-mcp] logs:    /var/lib/xcache-mcp/logs (events=on, bodies=on)
+[xcache-mcp] enabled tools (2): x_follows_changes_since, x_posts_since
+[xcache-mcp] HTTP listening on 0.0.0.0:8787
+```
+
+From OpenClaw (running on a different machine), point its MCP config at the
+HTTP URL:
+
+```bash
+curl -X POST http://proxy.lan:8787/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Stateless mode means each request creates a fresh `Server` and transport;
+there's no session ID and no server→client streaming notifications. `GET`
+and `DELETE` on `/mcp` return 405.
+
+**Security note:** the proxy has no auth on its HTTP listener — restrict
+network access at the firewall / reverse-proxy layer, or bind to `127.0.0.1`
+plus an SSH tunnel from the agent host. The proxy is read-only against X
+(no write tools exist), but it does hold the bearer token and serve cached
+content to anyone who can reach the port.
+
+### Local subprocess mode (alternative)
+
+If the agent runs on the same machine, you can also spawn the proxy as a
+subprocess and talk to it via stdio. Write a minimal config that flips the
+defaults:
+
+```jsonc
+// ~/openclaw/xcache.app.config.json
 {
   "version": 1,
   "server": { "http": { "enabled": false }, "stdio": { "enabled": true } },
@@ -170,18 +224,8 @@ stdio enabled:
 }
 ```
 
-### MCP via HTTP (Streamable, stateless)
-
-```bash
-curl -X POST http://localhost:8787/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
-
-Stateless mode means each request creates a fresh `Server` and transport;
-there's no session ID and no server→client streaming notifications. `GET` and
-`DELETE` on `/mcp` return 405.
+When `stdio.enabled` is true, stdout is the MCP protocol channel — all
+human-readable diagnostics go to stderr.
 
 ## Inspection
 

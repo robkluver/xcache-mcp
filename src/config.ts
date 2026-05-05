@@ -231,7 +231,7 @@ export function resolveAppConfig(): AppConfig {
       "[xcache-mcp] WARNING: X_BEARER_TOKEN is not set; upstream calls will fail.\n",
     );
   }
-  const configPath = process.env.XCACHE_CONFIG ?? "./app.config.json";
+  const configPath = path.resolve(expandHome(process.env.XCACHE_CONFIG ?? "./app.config.json"));
   const file = getAppFileConfig();
 
   const server: ServerConfig = {

@@ -51,10 +51,21 @@ async function main(): Promise<void> {
     }
   });
 
+  // Startup banner (stderr): show the resolved paths so the operator knows
+  // exactly where the config and on-disk state live for this process.
   process.stderr.write(
-    `[xcache-mcp] enabled tools (${cfg.enabledTools.size}): ${
-      cfg.enabledTools.size === 0 ? "<none>" : Array.from(cfg.enabledTools).sort().join(", ")
-    }\n`,
+    [
+      `[xcache-mcp] xcache-mcp v0.1.0`,
+      `[xcache-mcp] config:  ${cfg.configPath}`,
+      `[xcache-mcp] storage: ${cfg.root}`,
+      `[xcache-mcp] db:      ${cfg.dbPath}`,
+      `[xcache-mcp] logs:    ${cfg.logsDir}` +
+        ` (events=${cfg.logEvents ? "on" : "off"}, bodies=${cfg.logBodies ? "on" : "off"})`,
+      `[xcache-mcp] enabled tools (${cfg.enabledTools.size}): ${
+        cfg.enabledTools.size === 0 ? "<none>" : Array.from(cfg.enabledTools).sort().join(", ")
+      }`,
+      "",
+    ].join("\n"),
   );
 
   let httpClose: (() => Promise<void>) | null = null;
