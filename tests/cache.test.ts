@@ -82,7 +82,14 @@ describe("canonicalUrl", () => {
   });
   test("URLSearchParams input", () => {
     assert.equal(
-      canonicalUrl("https://api.x.com", "/2/u", new URLSearchParams([["a", "1"], ["b", "2"]])),
+      canonicalUrl(
+        "https://api.x.com",
+        "/2/u",
+        new URLSearchParams([
+          ["a", "1"],
+          ["b", "2"],
+        ]),
+      ),
       "https://api.x.com/2/u?a=1&b=2",
     );
   });
@@ -104,16 +111,10 @@ describe("queryFingerprint", () => {
     assert.equal(base, queryFingerprint("/2/x", { a: "1", cursor: "qqq" }));
   });
   test("differs for different param values", () => {
-    assert.notEqual(
-      queryFingerprint("/2/x", { a: "1" }),
-      queryFingerprint("/2/x", { a: "2" }),
-    );
+    assert.notEqual(queryFingerprint("/2/x", { a: "1" }), queryFingerprint("/2/x", { a: "2" }));
   });
   test("differs for different endpoint templates", () => {
-    assert.notEqual(
-      queryFingerprint("/2/x", { a: "1" }),
-      queryFingerprint("/2/y", { a: "1" }),
-    );
+    assert.notEqual(queryFingerprint("/2/x", { a: "1" }), queryFingerprint("/2/y", { a: "1" }));
   });
 });
 

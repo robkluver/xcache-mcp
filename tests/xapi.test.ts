@@ -47,10 +47,7 @@ describe("buildUrl", () => {
     );
   });
   test("normalizes leading slash", () => {
-    assert.equal(
-      buildUrl("https://api.x.com", "2/u", { a: "1" }),
-      "https://api.x.com/2/u?a=1",
-    );
+    assert.equal(buildUrl("https://api.x.com", "2/u", { a: "1" }), "https://api.x.com/2/u?a=1");
   });
   test("skips undefined params", () => {
     assert.equal(

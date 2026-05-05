@@ -35,7 +35,9 @@ function writeEvents(stem: string, events: object[]): string {
 }
 
 function jsonAfterHeading(text: string, heading: string): unknown {
-  const re = new RegExp(`## ${heading.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\s*(?:\\n[^\\n#]*)*\\n\`\`\`json\\n([\\s\\S]*?)\\n\`\`\``);
+  const re = new RegExp(
+    `## ${heading.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\s*(?:\\n[^\\n#]*)*\\n\`\`\`json\\n([\\s\\S]*?)\\n\`\`\``,
+  );
   const m = re.exec(text);
   assert.ok(m, `section "${heading}" not found in report`);
   return JSON.parse(m![1]!);
@@ -186,9 +188,7 @@ describe("runConsolidate — gzipped JSONL", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xcache-consolidate-gz-"));
     fs.mkdirSync(path.join(dir, "events"), { recursive: true });
     // Use yesterday's stem so the filter `dayInWindow` for --since 2d still picks it up.
-    const yesterday = new Date(Date.now() - 86_400_000)
-      .toISOString()
-      .slice(0, 10);
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
     const lines = [
       JSON.stringify({
         ts: new Date(Date.now() - 23 * 3_600_000).toISOString(),

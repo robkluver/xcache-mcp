@@ -1,13 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
-import {
-  dispatchTool,
-  TOOL_DEFINITIONS,
-  type ToolCallContext,
-} from "./tools.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { dispatchTool, TOOL_DEFINITIONS, type ToolCallContext } from "./tools.js";
 
 export type McpServerCtx = {
   client_kind: "mcp_http" | "mcp_stdio";

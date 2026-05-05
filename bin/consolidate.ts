@@ -450,7 +450,10 @@ export async function runConsolidate(argv: string[]): Promise<void> {
     calls_in_window: number;
   }> = [];
   // Group by hour and endpoint, find min remaining.
-  const rlBuckets = new Map<string, { ts: number; min: number; limit: number | null; calls: number; endpoint: string | null }>();
+  const rlBuckets = new Map<
+    string,
+    { ts: number; min: number; limit: number | null; calls: number; endpoint: string | null }
+  >();
   for (const r of rows) {
     if (r.rate_limit_remaining == null) continue;
     const hour = Math.floor(r.ts_ms / 3_600_000) * 3_600_000;
@@ -525,7 +528,11 @@ export async function runConsolidate(argv: string[]): Promise<void> {
     const out: unknown[] = [];
     for (const r of redundancy.slice(0, 5)) {
       const matching = rows
-        .filter((row) => row.query_fingerprint === r.fingerprint && (row.source === "live" || row.source === "error"))
+        .filter(
+          (row) =>
+            row.query_fingerprint === r.fingerprint &&
+            (row.source === "live" || row.source === "error"),
+        )
         .sort((a, b) => a.ts_ms - b.ts_ms);
       if (matching.length >= 2) {
         const a = matching[0]!;
@@ -590,7 +597,7 @@ const invokedDirectly = (() => {
 if (invokedDirectly) {
   runConsolidate(process.argv.slice(2)).catch((err) => {
     process.stderr.write(
-      `[consolidate] error: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+      `[consolidate] error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
     );
     process.exit(1);
   });

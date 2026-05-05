@@ -29,7 +29,7 @@ import {
   writeGateError,
   writeGateSuccess,
 } from "./gate.js";
-import { redactHeaders, xapiFetch, type XApiResponse } from "./xapi.js";
+import { redactHeaders, xapiFetch } from "./xapi.js";
 import { getLogWriter, type EventLogEntry } from "./log.js";
 import { intervalForError, type AppConfig } from "./config.js";
 import * as crypto from "node:crypto";
@@ -154,7 +154,10 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
       type: "object",
       properties: {
         username: { type: "string" },
-        since_iso: { type: "string", description: "ISO 8601 timestamp; only posts created at or after this time are returned." },
+        since_iso: {
+          type: "string",
+          description: "ISO 8601 timestamp; only posts created at or after this time are returned.",
+        },
         force_refresh: { type: "boolean" },
         max_pages: {
           type: "integer",
@@ -296,10 +299,6 @@ function fieldsListFromParams(
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function clientKindFromCtx(c: ToolCallContext): ToolCallContext["client_kind"] {
-  return c.client_kind;
 }
 
 // ---------- Tool 1: x_get_user_by_username ----------
@@ -501,9 +500,7 @@ export async function tool_x_get_tweet(
     });
     if (existing) {
       const refreshed = getPost(id);
-      const rec = refreshed
-        ? (rowToPostRecord(refreshed) as Record<string, unknown>)
-        : {};
+      const rec = refreshed ? (rowToPostRecord(refreshed) as Record<string, unknown>) : {};
       return { ...rec, deleted: true };
     }
     return { error: "not_found", message: "Tweet does not exist or is unavailable upstream." };
@@ -897,11 +894,7 @@ async function resolveUserId(
     }
   }
   const result = await tool_x_get_user_by_username(call, { username: uname });
-  if (
-    result &&
-    typeof result === "object" &&
-    (result as { data?: { id?: string } })?.data?.id
-  ) {
+  if (result && typeof result === "object" && (result as { data?: { id?: string } })?.data?.id) {
     return {
       user_id: (result as { data: { id: string } }).data.id,
       touched_upstream: true,
@@ -1007,12 +1000,15 @@ export async function tool_x_posts_since(
         break;
       }
 
-      const json = res.json as
-        | {
-            data?: any[];
-            meta?: { result_count?: number; next_token?: string; newest_id?: string; oldest_id?: string };
-          }
-        | null;
+      const json = res.json as {
+        data?: any[];
+        meta?: {
+          result_count?: number;
+          next_token?: string;
+          newest_id?: string;
+          oldest_id?: string;
+        };
+      } | null;
       const data = json?.data ?? [];
       const observedAt = Date.now();
       let newestInPageId: string | null = null;
@@ -1145,11 +1141,7 @@ function persistTweet(t: any): void {
   const created_ms = Date.parse(t.created_at ?? "");
   const observedAt = Date.now();
   const author_id =
-    typeof t.author_id === "string"
-      ? t.author_id
-      : typeof t.user_id === "string"
-        ? t.user_id
-        : "";
+    typeof t.author_id === "string" ? t.author_id : typeof t.user_id === "string" ? t.user_id : "";
   const pm = t.public_metrics ?? {};
   upsertPost({
     tweet_id: String(t.id),
@@ -1159,7 +1151,8 @@ function persistTweet(t: any): void {
     conversation_id: t.conversation_id ?? null,
     in_reply_to_user_id: t.in_reply_to_user_id ?? null,
     lang: t.lang ?? null,
-    possibly_sensitive: typeof t.possibly_sensitive === "boolean" ? (t.possibly_sensitive ? 1 : 0) : null,
+    possibly_sensitive:
+      typeof t.possibly_sensitive === "boolean" ? (t.possibly_sensitive ? 1 : 0) : null,
     retweet_count: typeof pm.retweet_count === "number" ? pm.retweet_count : null,
     reply_count: typeof pm.reply_count === "number" ? pm.reply_count : null,
     like_count: typeof pm.like_count === "number" ? pm.like_count : null,
@@ -1184,7 +1177,8 @@ function persistTweetForUser(t: any, user_id: string, observedAt: number): void 
     conversation_id: t.conversation_id ?? null,
     in_reply_to_user_id: t.in_reply_to_user_id ?? null,
     lang: t.lang ?? null,
-    possibly_sensitive: typeof t.possibly_sensitive === "boolean" ? (t.possibly_sensitive ? 1 : 0) : null,
+    possibly_sensitive:
+      typeof t.possibly_sensitive === "boolean" ? (t.possibly_sensitive ? 1 : 0) : null,
     retweet_count: typeof pm.retweet_count === "number" ? pm.retweet_count : null,
     reply_count: typeof pm.reply_count === "number" ? pm.reply_count : null,
     like_count: typeof pm.like_count === "number" ? pm.like_count : null,
@@ -1319,12 +1313,10 @@ export async function tool_x_follows_changes_since(
         errored = true;
         break;
       }
-      const json = res.json as
-        | {
-            data?: Array<{ id: string; username?: string; name?: string; description?: string }>;
-            meta?: { result_count?: number; next_token?: string };
-          }
-        | null;
+      const json = res.json as {
+        data?: Array<{ id: string; username?: string; name?: string; description?: string }>;
+        meta?: { result_count?: number; next_token?: string };
+      } | null;
       const data = json?.data ?? [];
       for (const u of data) {
         members.push(String(u.id));
@@ -1446,7 +1438,9 @@ export async function tool_x_follows_changes_since(
       ? Array.from(latestMembers)
       : Array.from(latestMembers).filter((id) => !baselineMembers!.has(id));
   const unfollowIds: string[] =
-    baselineMembers === null ? [] : Array.from(baselineMembers).filter((id) => !latestMembers.has(id));
+    baselineMembers === null
+      ? []
+      : Array.from(baselineMembers).filter((id) => !latestMembers.has(id));
 
   const allIds = Array.from(new Set([...newFollowIds, ...unfollowIds]));
   const detailRows = getFollowUserDetails(allIds);
@@ -1557,12 +1551,16 @@ export async function tool_x_verify_posts(
       });
       break;
     }
-    const json = res.json as
-      | {
-          data?: any[];
-          errors?: Array<{ resource_type?: string; resource_id?: string; value?: string; type?: string; title?: string }>;
-        }
-      | null;
+    const json = res.json as {
+      data?: any[];
+      errors?: Array<{
+        resource_type?: string;
+        resource_id?: string;
+        value?: string;
+        type?: string;
+        title?: string;
+      }>;
+    } | null;
     const liveSet = new Set<string>();
     const observedAt = Date.now();
     for (const t of json?.data ?? []) {

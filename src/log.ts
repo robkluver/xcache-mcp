@@ -42,9 +42,7 @@ export type BodyLogEntry = {
   body: string;
 };
 
-type Queued =
-  | { kind: "event"; entry: EventLogEntry }
-  | { kind: "body"; entry: BodyLogEntry };
+type Queued = { kind: "event"; entry: EventLogEntry } | { kind: "body"; entry: BodyLogEntry };
 
 class BoundedQueue<T> {
   private items: T[] = [];
@@ -90,13 +88,16 @@ export class LogWriter {
     }, FLUSH_INTERVAL_MS);
     if (this.timer.unref) this.timer.unref();
     // Daily rotation check (gzip files older than 7 days).
-    const rotateTimer = setInterval(() => {
-      try {
-        this.rotateOldFiles();
-      } catch {
-        // ignore
-      }
-    }, 60 * 60 * 1000);
+    const rotateTimer = setInterval(
+      () => {
+        try {
+          this.rotateOldFiles();
+        } catch {
+          // ignore
+        }
+      },
+      60 * 60 * 1000,
+    );
     if (rotateTimer.unref) rotateTimer.unref();
   }
 

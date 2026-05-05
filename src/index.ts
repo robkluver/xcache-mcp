@@ -102,7 +102,7 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   process.stderr.write(
-    `[xcache-mcp] fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+    `[xcache-mcp] fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
   );
   process.exit(1);
 });

@@ -121,21 +121,17 @@ async function spawnProxy(env: NodeJS.ProcessEnv): Promise<Spawned> {
   const { spawn } = await import("node:child_process");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "xcache-smoke-"));
   const port = 19000 + Math.floor(Math.random() * 1000);
-  const child = spawn(
-    process.execPath,
-    [path.join(process.cwd(), "dist", "src", "index.js")],
-    {
-      env: {
-        ...process.env,
-        ...env,
-        XCACHE_ROOT: root,
-        XCACHE_PORT: String(port),
-        XCACHE_NO_STDIO: "1",
-        LOG_LEVEL: "warn",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
+  const child = spawn(process.execPath, [path.join(process.cwd(), "dist", "src", "index.js")], {
+    env: {
+      ...process.env,
+      ...env,
+      XCACHE_ROOT: root,
+      XCACHE_PORT: String(port),
+      XCACHE_NO_STDIO: "1",
+      LOG_LEVEL: "warn",
     },
-  );
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   child.stdout?.on("data", (d) => process.stderr.write(`[proxy stdout] ${d}`));
   child.stderr?.on("data", (d) => process.stderr.write(`[proxy stderr] ${d}`));
 
@@ -291,7 +287,10 @@ async function main() {
     });
     ok(Array.isArray(p1?.posts), "x_posts_since first call returns posts array");
     ok(p1?.touched_upstream === true, "x_posts_since first call touched_upstream === true");
-    ok((p1?.posts?.length ?? 0) >= 2, `x_posts_since first call returned >=2 posts (got ${p1?.posts?.length ?? 0})`);
+    ok(
+      (p1?.posts?.length ?? 0) >= 2,
+      `x_posts_since first call returned >=2 posts (got ${p1?.posts?.length ?? 0})`,
+    );
     const tweetsCallsAfterFirst = fakeState.tweets_calls;
     ok(
       tweetsCallsAfterFirst > tweetsCallsBefore,
@@ -307,7 +306,10 @@ async function main() {
       fakeState.tweets_calls === tweetsCallsAfterFirst,
       `x_posts_since second call did NOT hit upstream (calls still ${tweetsCallsAfterFirst})`,
     );
-    ok((p2?.posts?.length ?? 0) === (p1?.posts?.length ?? -1), "x_posts_since second call returns same posts");
+    ok(
+      (p2?.posts?.length ?? 0) === (p1?.posts?.length ?? -1),
+      "x_posts_since second call returns same posts",
+    );
 
     // ---- Acceptance criterion 6: x_get_tweet 404 marks deleted ----
     const tid = "1000000000000000999";
@@ -335,7 +337,10 @@ async function main() {
     // earlier may not have stored author_id (we didn't request expansions), so insert via
     // verify won't see it. Instead, verify that x_get_tweet from cache still works:
     const t2 = await postMcp(proxy.port, 22, "x_get_tweet", { id_or_url: tid });
-    ok(t2?.deleted === false, "x_get_tweet after upstream delete still serves from cache (gate=never)");
+    ok(
+      t2?.deleted === false,
+      "x_get_tweet after upstream delete still serves from cache (gate=never)",
+    );
 
     // ---- Acceptance criterion 8: bearer token never appears in logs ----
     const dir = path.join(proxy.root, "logs");
@@ -420,7 +425,10 @@ async function main() {
     const report = fs.readFileSync(reportPath, "utf8");
     ok(report.startsWith("# xcache-mcp summary "), "consolidate report has expected header");
     ok(report.includes("## window"), "consolidate report has window section");
-    ok(report.includes("## top endpoints by upstream calls"), "consolidate report has endpoints section");
+    ok(
+      report.includes("## top endpoints by upstream calls"),
+      "consolidate report has endpoints section",
+    );
   } finally {
     try {
       await fake.close();

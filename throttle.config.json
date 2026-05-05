@@ -2,13 +2,13 @@
   "version": 1,
   "default_min_interval": "24h",
   "operations": {
-    "get_user_following":   "24h",
-    "get_latest_posts":     "1h",
+    "get_user_following": "24h",
+    "get_latest_posts": "1h",
     "get_user_by_username": "7d",
-    "get_user_by_id":       "7d",
-    "get_tweet":            "never",
-    "verify_posts":         "7d",
-    "raw_get":              "24h"
+    "get_user_by_id": "7d",
+    "get_tweet": "never",
+    "verify_posts": "7d",
+    "raw_get": "24h"
   },
   "error_retry_intervals": {
     "401": "never",

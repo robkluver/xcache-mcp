@@ -178,12 +178,21 @@ npm run consolidate -- --since 1d --output report.md
 The output mixes human prose with dense JSON code blocks. Empty sections are
 omitted. Target output size for one week: 5–15K tokens.
 
-## Tests
+## Quality pipeline
 
 ```bash
-npm test            # 114 unit tests across 7 suites (~1s, no network)
-npm run test:smoke  # end-to-end smoke test against an in-process fake X API
+npm run lint          # ESLint with typescript-eslint strict preset
+npm run format        # Prettier: rewrite to canonical style
+npm run format:check  # Prettier: fail on any mis-formatted file
+npm run build         # tsc --strict
+npm test              # 114 unit tests (~1s, no network)
+npm run test:coverage # unit tests + per-file line/branch coverage report
+npm run test:smoke    # end-to-end smoke test against an in-process fake X API
+npm run ci            # the lot, in order — same as GitHub Actions runs
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs lint+format-check, build,
+unit tests with coverage, and the smoke test on every push and PR.
 
 The unit suite covers `parseInterval`, gate state transitions, `canonicalUrl`
 / `queryFingerprint`, `url_cache` round-trip, posts upsert conflict semantics,
@@ -193,7 +202,11 @@ log mode 0600, `extractTweetId` edge cases, `rowToPostRecord` shape, and the
 consolidate script's section structure.
 
 `scripts/smoke-test.ts` spins up an in-process fake X API and exercises every
-acceptance criterion end-to-end.
+acceptance criterion end-to-end. Coverage on the unit suite alone is 100% on
+`gate.ts`, 99% on `cache.ts`, ~80% branches overall; lower line coverage on
+`tools.ts` and `xapi.ts` is by design — those modules' main flows are
+exercised by the smoke test rather than unit tests, to avoid brittle network
+mocking.
 
 ## Living spec (Gherkin)
 

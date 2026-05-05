@@ -78,10 +78,7 @@ export type XApiCallContext = {
   timeoutMs?: number;
 };
 
-export async function xapiFetch(
-  ctx: XApiCallContext,
-  req: XApiRequest,
-): Promise<XApiResponse> {
+export async function xapiFetch(ctx: XApiCallContext, req: XApiRequest): Promise<XApiResponse> {
   const requestId = newRequestId();
   const url = buildUrl(ctx.apiBase, req.path, req.params);
   const t0 = Date.now();

@@ -229,8 +229,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
     // Hijack so the MCP SDK transport can write directly to the raw response.
     reply.hijack();
     const sessionHeader = req.headers["x-agent-session"];
-    const agentSession =
-      typeof sessionHeader === "string" ? sessionHeader : undefined;
+    const agentSession = typeof sessionHeader === "string" ? sessionHeader : undefined;
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

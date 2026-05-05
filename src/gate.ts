@@ -24,16 +24,11 @@ export type GateState = {
 
 export function readGate(operation: string, account_id: string): GateRow | undefined {
   return getDb()
-    .prepare(
-      "SELECT * FROM fetch_gate WHERE operation = ? AND account_id = ?",
-    )
+    .prepare("SELECT * FROM fetch_gate WHERE operation = ? AND account_id = ?")
     .get(operation, account_id) as GateRow | undefined;
 }
 
-function effectiveInterval(
-  operation: string,
-  row: GateRow,
-): number | "never" | "always" {
+function effectiveInterval(operation: string, row: GateRow): number | "never" | "always" {
   if (row.last_status && row.last_status >= 400) {
     return intervalForError(row.last_status);
   }
