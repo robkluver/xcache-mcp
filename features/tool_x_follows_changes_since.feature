@@ -8,7 +8,9 @@ Feature: Tool x_follows_changes_since (★ preferred for monitoring follow-list 
   # Operation:    get_user_following
   # Default gate: 24h
   # Account ID:   resolved user_id
-  # Upstream:     GET /2/users/:id/following (paginated to completion, capped at 100 pages)
+  # Upstream:     GET /2/users/:id/following (paginated newest-first; first-observation
+  #                walks capped at 5 pages, subsequent walks early-stop on cached IDs
+  #                with a defensive cap of 100 pages)
 
   Background:
     Given the proxy is running with X_BEARER_TOKEN set
@@ -20,7 +22,7 @@ Feature: Tool x_follows_changes_since (★ preferred for monitoring follow-list 
     Given there are no follow_snapshots rows for the user
     And the gate is open
     When the agent calls x_follows_changes_since
-    Then the proxy walks /2/users/:id/following paginated to completion (cap 100 pages)
+    Then the proxy walks /2/users/:id/following up to the first-observation cap (5 pages)
     And a new follow_snapshots row is inserted with taken_at = now
     And follow_snapshot_members rows are inserted for every followed account
     And follow_user_details is upserted for every member returned in the expansion
@@ -121,8 +123,18 @@ Feature: Tool x_follows_changes_since (★ preferred for monitoring follow-list 
 
   # ---------- Pagination safety ----------
 
-  Scenario: Defensive page cap of 100 prevents runaway pagination
-    Given upstream keeps returning next_token indefinitely (pathological case)
+  Scenario: First-observation page cap bounds the cold-start spike
+    Given there are no prior snapshots for the user
+    And upstream keeps returning next_token indefinitely (pathological case)
+    When the agent calls x_follows_changes_since
+    Then the proxy stops walking after at most 5 pages on first observation
+    And the resulting snapshot's walk_kind is "partial"
+    # We accept a partial baseline rather than potentially making 100 calls for
+    # a brand-new account. Subsequent calls rely on early-stop to stay cheap.
+
+  Scenario: Defensive page cap of 100 prevents runaway pagination on subsequent walks
+    Given a previous snapshot exists for the user
+    And early-stop never fires (none of the new follows are in priorMembers)
     When the agent calls x_follows_changes_since
     Then the proxy stops walking after at most 100 pages
     And no infinite loop occurs

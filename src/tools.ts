@@ -1322,7 +1322,10 @@ export async function tool_x_follows_changes_since(
     }> = [];
     let api_calls = 0;
     let depth = 0;
-    const MAX_PAGES = 100;
+    // First-observation walks can't early-stop (no prior members to recognize),
+    // so we cap them tightly to bound the worst-case spike for new accounts.
+    // Subsequent walks rely on early-stop to terminate quickly.
+    const MAX_PAGES = priorMembers === null ? 5 : 100;
     let errored = false;
     let earlyStopHit = false;
     while (depth < MAX_PAGES) {
