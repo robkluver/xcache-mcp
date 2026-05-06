@@ -127,6 +127,34 @@ Across all tools, watch for these signals:
 You don't need to retry when this is `false`. The cached data is the most
 recent the proxy is willing to serve.
 
+### `cost` (on every MCP tool response)
+
+When billing is enabled, every tool response includes a top-level `cost`
+block:
+
+```
+"cost": {
+  "this_call_usd":     0.005000,
+  "period_total_usd":  0.123456,
+  "period_started_iso":"2026-05-01T00:00:00.000Z",
+  "currency":          "USD"
+}
+```
+
+- `this_call_usd` is the estimated incremental cost of *this* tool call —
+  the diff between the period total before and after the call. Cache-only
+  calls are 0.
+- `period_total_usd` is the cumulative bill since the configured billing
+  period started. The period rolls over automatically at the configured
+  day-of-month + time.
+- Owned reads (against the developer's own user id) bill at the lower
+  `owned_read` rate. The proxy auto-detects the owner via `GET /2/users/me`
+  on first startup and caches it.
+
+REST passthrough responses surface the same numbers as response headers:
+`x-xcache-cost-estimate`, `x-xcache-cost-period`, `x-xcache-cost-period-start`,
+`x-xcache-cost-currency`.
+
 ### `gate.next_eligible_at`
 
 The earliest UTC ISO time at which calling this tool with the same

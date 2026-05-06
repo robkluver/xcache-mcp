@@ -91,6 +91,25 @@ stays out of the environment.
     "permit_force_refresh": true
   },
 
+  "billing": {
+    "enabled": true,
+    // Day-of-month + UTC HH:MM that anchors the running monthly total.
+    // Day 29-31 floors to the last day of months that don't have it.
+    "period_start_day":  1,
+    "period_start_time": "00:00",
+    // Optional: pin the developer's own user id. Otherwise auto-detected
+    // via GET /2/users/me on first start and persisted.
+    // "owner_user_id": "1234567890",
+    "rates": {
+      "owned_read":     0.001,  // reads against your own account_id
+      "post_read":      0.005,  // /2/tweets/*, /2/users/*/tweets, etc.
+      "user_read":      0.010,  // /2/users, /2/users/by/*, /2/users/me
+      "following_read": 0.010,  // /2/users/*/following, /followers
+      "list_read":      0.005,
+      "default_read":   0.005
+    }
+  },
+
   "throttle": {
     "default_min_interval": "24h",
     "operations": {

@@ -11,6 +11,7 @@ import { initLogWriter, getLogWriter } from "./log.js";
 import { initToolContext } from "./tools.js";
 import { buildFastify } from "./server.js";
 import { createMcpServer } from "./mcp.js";
+import { resolveOwnerUserId } from "./billing.js";
 
 /** Replace the contents of `target` with `source`, preserving the Set reference
  *  so consumers holding a reference (e.g. the long-lived stdio MCP server) see
@@ -36,6 +37,28 @@ async function main(): Promise<void> {
   openDb(cfg.dbPath);
   initLogWriter(cfg.logsDir, cfg.logBodies, cfg.logEvents);
   initToolContext(cfg);
+
+  // Resolve owner_user_id for billing (best-effort; non-fatal on failure).
+  if (cfg.billing.enabled) {
+    try {
+      const owner = await resolveOwnerUserId({
+        cfg: cfg.billing,
+        bearerToken: cfg.bearerToken,
+        apiBase: cfg.xApiBase,
+      });
+      if (owner) {
+        process.stderr.write(`[xcache-mcp] billing owner_user_id: ${owner}\n`);
+      } else {
+        process.stderr.write(
+          "[xcache-mcp] billing owner_user_id: <unresolved> (non-owned rates will apply)\n",
+        );
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[xcache-mcp] billing owner_user_id resolution failed: ${(err as Error).message}\n`,
+      );
+    }
+  }
 
   // SIGHUP → reload app config file (no-op if file unreadable, just logs to stderr).
   // tools.enabled changes propagate to in-flight servers because we mutate
@@ -83,6 +106,7 @@ async function main(): Promise<void> {
     const server = createMcpServer({
       client_kind: "mcp_stdio",
       enabledTools: cfg.enabledTools,
+      billing: cfg.billing,
     });
     const transport = new StdioServerTransport();
     await server.connect(transport);

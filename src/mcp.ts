@@ -1,11 +1,14 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { dispatchTool, enabledToolDefinitions, type ToolCallContext } from "./tools.js";
+import { getPeriodSnapshot } from "./billing.js";
+import type { BillingConfig } from "./config.js";
 
 export type McpServerCtx = {
   client_kind: "mcp_http" | "mcp_stdio";
   agent_session_id?: string;
   enabledTools: Set<string>;
+  billing: BillingConfig;
 };
 
 export function createMcpServer(ctx: McpServerCtx): Server {
@@ -39,13 +42,27 @@ export function createMcpServer(ctx: McpServerCtx): Server {
       mcp_tool: name,
       ...(ctx.agent_session_id ? { agent_session_id: ctx.agent_session_id } : {}),
     };
+    const before = ctx.billing.enabled ? getPeriodSnapshot(ctx.billing) : null;
     try {
       const result = await dispatchTool(callCtx, name, args, ctx.enabledTools);
+      const after = ctx.billing.enabled ? getPeriodSnapshot(ctx.billing) : null;
+      const enriched =
+        before && after && typeof result === "object" && result !== null
+          ? {
+              ...(result as Record<string, unknown>),
+              cost: {
+                this_call_usd: round6(after.period_total_usd - before.period_total_usd),
+                period_total_usd: round6(after.period_total_usd),
+                period_started_iso: after.period_started_iso,
+                currency: "USD",
+              },
+            }
+          : result;
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2),
+            text: JSON.stringify(enriched, null, 2),
           },
         ],
       };
@@ -64,4 +81,8 @@ export function createMcpServer(ctx: McpServerCtx): Server {
   });
 
   return server;
+}
+
+function round6(n: number): number {
+  return Math.round(n * 1_000_000) / 1_000_000;
 }

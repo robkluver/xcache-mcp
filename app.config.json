@@ -21,6 +21,19 @@
     "enabled": ["x_posts_since", "x_follows_changes_since"],
     "permit_force_refresh": true
   },
+  "billing": {
+    "enabled": true,
+    "period_start_day": 1,
+    "period_start_time": "00:00",
+    "rates": {
+      "owned_read": 0.001,
+      "post_read": 0.005,
+      "user_read": 0.01,
+      "following_read": 0.01,
+      "list_read": 0.005,
+      "default_read": 0.005
+    }
+  },
   "throttle": {
     "default_min_interval": "24h",
     "operations": {

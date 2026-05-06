@@ -55,6 +55,29 @@ export type ThrottleConfig = {
   error_retry_intervals: Record<string, string>;
 };
 
+/** Per-resource USD rates from X API pricing (defaults match the public table
+ *  as of April 2026). Operator can override individual rates if X changes them. */
+export type BillingRates = {
+  owned_read: number;
+  post_read: number;
+  user_read: number;
+  following_read: number;
+  list_read: number;
+  default_read: number;
+};
+
+export type BillingConfig = {
+  enabled: boolean;
+  /** Day of month the billing period starts (1-31). 29-31 floor to last day of month. */
+  period_start_day: number;
+  /** "HH:MM" 24-hour, UTC. */
+  period_start_time: string;
+  /** Optional manual override of the developer account's user_id. If absent
+   *  the proxy auto-detects via /2/users/me on first startup and persists it. */
+  owner_user_id?: string;
+  rates: BillingRates;
+};
+
 export type AppFileConfig = {
   version: number;
   server?: Partial<ServerConfig>;
@@ -62,6 +85,7 @@ export type AppFileConfig = {
   x_api?: Partial<XApiConfig>;
   logging?: Partial<LoggingConfig>;
   tools?: ToolsConfig;
+  billing?: Partial<BillingConfig>;
   throttle: ThrottleConfig;
 };
 
@@ -82,6 +106,7 @@ export type AppConfig = {
   logBodies: boolean;
   enabledTools: Set<string>;
   permitForceRefresh: boolean;
+  billing: BillingConfig;
   dbPath: string;
   logsDir: string;
 };
@@ -128,6 +153,20 @@ const DEFAULT_LOGGING: LoggingConfig = {
   level: "info",
   events: true,
   bodies: true,
+};
+
+const DEFAULT_BILLING: BillingConfig = {
+  enabled: true,
+  period_start_day: 1,
+  period_start_time: "00:00",
+  rates: {
+    owned_read: 0.001,
+    post_read: 0.005,
+    user_read: 0.01,
+    following_read: 0.01,
+    list_read: 0.005,
+    default_read: 0.005,
+  },
 };
 
 // ---------- Helpers ----------
@@ -300,6 +339,15 @@ export function resolveAppConfig(): AppConfig {
     logBodies: logging.bodies,
     enabledTools: getFileEnabledTools(),
     permitForceRefresh: file.tools?.permit_force_refresh ?? true,
+    billing: {
+      enabled: file.billing?.enabled ?? DEFAULT_BILLING.enabled,
+      period_start_day: file.billing?.period_start_day ?? DEFAULT_BILLING.period_start_day,
+      period_start_time: file.billing?.period_start_time ?? DEFAULT_BILLING.period_start_time,
+      ...(file.billing?.owner_user_id !== undefined
+        ? { owner_user_id: file.billing.owner_user_id }
+        : {}),
+      rates: { ...DEFAULT_BILLING.rates, ...(file.billing?.rates ?? {}) },
+    },
     dbPath: path.join(storage.root, "data.db"),
     logsDir,
   };

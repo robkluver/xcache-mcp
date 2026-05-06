@@ -174,6 +174,39 @@ Feature: Configuration loading and reload
     Then loading fails with a clear error
     And startup is aborted
 
+  # ---------- Billing section ----------
+
+  Scenario: Billing defaults when section is omitted
+    Given app.config.json has no "billing" section
+    When the proxy starts
+    Then billing.enabled is true
+    And billing.period_start_day is 1
+    And billing.period_start_time is "00:00"
+    And billing.rates use the default per-resource USD values
+
+  Scenario: Billing period anchor overrides
+    Given app.config.json billing section:
+      """
+      "billing": { "enabled": true,
+                   "period_start_day": 15,
+                   "period_start_time": "08:30" }
+      """
+    When the proxy starts
+    Then the running period is anchored to day 15 at 08:30 UTC
+    And the running total rolls over at that anchor each month
+
+  Scenario: Billing rate overrides merge over defaults
+    Given app.config.json billing.rates overrides only "post_read" to 0.004
+    When the proxy starts
+    Then billing.rates.post_read is 0.004
+    And every other rate retains its default value
+
+  Scenario: Billing disabled → no headers, no cost block
+    Given app.config.json billing.enabled is false
+    When a REST passthrough request completes
+    Then no x-xcache-cost-* headers are present on the response
+    And MCP tool responses do not include a "cost" block
+
   # ---------- Throttle section ----------
 
   Scenario Outline: Interval string parsing

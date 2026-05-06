@@ -8,6 +8,7 @@ import { gateState, lastFetchedIso, writeGateError, writeGateSuccess } from "./g
 import { redactHeaders, xapiFetch } from "./xapi.js";
 import { getLogWriter, type EventLogEntry } from "./log.js";
 import { type AppConfig } from "./config.js";
+import { getOwnerUserId, getPeriodSnapshot, recordCostForEvent } from "./billing.js";
 
 export function buildFastify(cfg: AppConfig): FastifyInstance {
   const app = Fastify({
@@ -29,6 +30,21 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
       "  POST /mcp                 MCP Streamable HTTP transport (stateless)\n"
     );
   });
+
+  /** Apply billing-cost headers to a REST response. costUsd > 0 only on live
+   *  upstream calls; cache hits and gate-blocked responses use cost=0 but
+   *  still report the cumulative period total. */
+  function applyBillingHeaders(
+    reply: FastifyReply,
+    costUsd: number,
+    snap: { period_total_usd: number; period_started_iso: string },
+  ): void {
+    if (!cfg.billing.enabled) return;
+    reply.header("x-xcache-cost-estimate", costUsd.toFixed(6));
+    reply.header("x-xcache-cost-period", snap.period_total_usd.toFixed(6));
+    reply.header("x-xcache-cost-period-start", snap.period_started_iso);
+    reply.header("x-xcache-cost-currency", "USD");
+  }
 
   // REST proxy: forward GET /2/* → api.x.com/2/*
   app.get<{ Params: { "*": string } }>("/2/*", async (req, reply) => {
@@ -113,6 +129,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
         reply.code(cached.status);
         reply.header("content-type", "application/json");
         reply.header("x-xcache-source", "cache");
+        applyBillingHeaders(reply, 0, getPeriodSnapshot(cfg.billing));
         return cached.body;
       }
       // Gate closed and no cache → previous error within retry window. Don't hit upstream.
@@ -138,6 +155,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
       reply.code(429);
       reply.header("content-type", "application/json");
       reply.header("x-xcache-source", "gate_blocked");
+      applyBillingHeaders(reply, 0, getPeriodSnapshot(cfg.billing));
       return JSON.stringify({
         error: "gate_blocked",
         message:
@@ -182,10 +200,12 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
         reply.code(cached.status);
         reply.header("content-type", "application/json");
         reply.header("x-xcache-source", "stale_cache");
+        applyBillingHeaders(reply, 0, getPeriodSnapshot(cfg.billing));
         return cached.body;
       }
       reply.code(res.status || 502);
       reply.header("content-type", "application/json");
+      applyBillingHeaders(reply, 0, getPeriodSnapshot(cfg.billing));
       return res.body || JSON.stringify({ error: res.errorMessage ?? "upstream_error" });
     }
 
@@ -198,6 +218,16 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
       body: res.body,
     });
     writeGateSuccess({ operation, account_id, status: res.status });
+    const resultCount = extractResultCount(res.json);
+    const billing = recordCostForEvent({
+      source: "live",
+      status: res.status,
+      resultCount,
+      endpointTemplate: path,
+      accountId: account_id,
+      cfg: cfg.billing,
+      ownerUserId: getOwnerUserId(),
+    });
     writer.enqueueEvent({
       ...baseLog,
       request_id: res.requestId,
@@ -207,7 +237,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
       gate_state: { open: false, last_fetched_at: new Date().toISOString() },
       duration_ms: res.durationMs,
       response_bytes: res.body.length,
-      result_count: extractResultCount(res.json),
+      result_count: resultCount,
       next_token_present: extractNextTokenPresent(res.json),
       rate_limit_limit: res.rateLimit.limit,
       rate_limit_remaining: res.rateLimit.remaining,
@@ -221,6 +251,10 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
     reply.code(res.status);
     reply.header("content-type", "application/json");
     reply.header("x-xcache-source", "live");
+    applyBillingHeaders(reply, billing.cost_usd, {
+      period_total_usd: billing.period_total_usd,
+      period_started_iso: billing.period_started_iso,
+    });
     return res.body;
   });
 
@@ -237,6 +271,7 @@ export function buildFastify(cfg: AppConfig): FastifyInstance {
     const server = createMcpServer({
       client_kind: "mcp_http",
       enabledTools: cfg.enabledTools,
+      billing: cfg.billing,
       ...(agentSession ? { agent_session_id: agentSession } : {}),
     });
 
