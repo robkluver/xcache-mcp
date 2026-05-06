@@ -521,3 +521,131 @@ describe("metaIncrement", () => {
     assert.equal(row?.value, "10");
   });
 });
+
+describe("following_history (v3)", () => {
+  // Imports added inline so the new test block is self-contained for review.
+  test("first observation inserts with first_observed_at and first_observed_via", async () => {
+    const cache = await import("../src/cache.ts");
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-A",
+      followed_user_id: "alice",
+      via: "forward",
+      observed_at: 1000,
+    });
+    const rows = cache.getFollowingHistory("fh-A");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.followed_user_id, "alice");
+    assert.equal(rows[0]!.first_observed_at, 1000);
+    assert.equal(rows[0]!.first_observed_via, "forward");
+    assert.equal(rows[0]!.last_observed_at, 1000);
+  });
+
+  test("re-observing preserves first_observed_at and first_observed_via, updates last_observed_at", async () => {
+    const cache = await import("../src/cache.ts");
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-B",
+      followed_user_id: "bob",
+      via: "backfill",
+      observed_at: 2000,
+    });
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-B",
+      followed_user_id: "bob",
+      via: "forward", // would-be flip on re-observe is ignored — preserved
+      observed_at: 3000,
+    });
+    const rows = cache.getFollowingHistory("fh-B");
+    const bob = rows.find((r) => r.followed_user_id === "bob")!;
+    assert.equal(bob.first_observed_at, 2000);
+    assert.equal(bob.first_observed_via, "backfill"); // preserved on conflict
+    assert.equal(bob.last_observed_at, 3000); // refreshed
+  });
+
+  test("getFollowingHistory orders by first_observed_at DESC", async () => {
+    const cache = await import("../src/cache.ts");
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-C",
+      followed_user_id: "u1",
+      via: "forward",
+      observed_at: 1000,
+    });
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-C",
+      followed_user_id: "u3",
+      via: "forward",
+      observed_at: 3000,
+    });
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-C",
+      followed_user_id: "u2",
+      via: "forward",
+      observed_at: 2000,
+    });
+    const rows = cache.getFollowingHistory("fh-C");
+    assert.deepEqual(
+      rows.map((r) => r.followed_user_id),
+      ["u3", "u2", "u1"],
+    );
+  });
+
+  test("followedUserIdsForFollower returns the set of followed_user_ids", async () => {
+    const cache = await import("../src/cache.ts");
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-D",
+      followed_user_id: "x",
+      via: "forward",
+      observed_at: 100,
+    });
+    cache.upsertFollowingObservation({
+      follower_user_id: "fh-D",
+      followed_user_id: "y",
+      via: "backfill",
+      observed_at: 200,
+    });
+    const ids = cache.followedUserIdsForFollower("fh-D");
+    assert.equal(ids.size, 2);
+    assert.ok(ids.has("x"));
+    assert.ok(ids.has("y"));
+  });
+});
+
+describe("following_state (v3)", () => {
+  test("missing row returns undefined", async () => {
+    const cache = await import("../src/cache.ts");
+    assert.equal(cache.getFollowingState("fs-missing"), undefined);
+  });
+
+  test("set then get round-trips", async () => {
+    const cache = await import("../src/cache.ts");
+    cache.setFollowingState({
+      follower_user_id: "fs-A",
+      next_pagination_token: "token-123",
+      caught_up: false,
+      last_walked_at: 5000,
+    });
+    const row = cache.getFollowingState("fs-A")!;
+    assert.equal(row.next_pagination_token, "token-123");
+    assert.equal(row.caught_up, 0);
+    assert.equal(row.last_walked_at, 5000);
+  });
+
+  test("upsert overwrites previous values", async () => {
+    const cache = await import("../src/cache.ts");
+    cache.setFollowingState({
+      follower_user_id: "fs-B",
+      next_pagination_token: "token-1",
+      caught_up: false,
+      last_walked_at: 100,
+    });
+    cache.setFollowingState({
+      follower_user_id: "fs-B",
+      next_pagination_token: null,
+      caught_up: true,
+      last_walked_at: 200,
+    });
+    const row = cache.getFollowingState("fs-B")!;
+    assert.equal(row.next_pagination_token, null);
+    assert.equal(row.caught_up, 1);
+    assert.equal(row.last_walked_at, 200);
+  });
+});

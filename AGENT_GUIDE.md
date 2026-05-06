@@ -33,7 +33,7 @@ across sessions — it is a single-user cache with infinite retention.
 | 3 | `x_get_tweet` | One-off tweet lookup; auto-detects deletion | never (after first cache) |
 | 4 | `x_raw_get` | Escape hatch for arbitrary `/2/*` GETs | 24h |
 | 5 | `x_posts_since` ★ | **Preferred for monitoring posts over time** | 1h |
-| 6 | `x_follows_changes_since` ★ | **Preferred for monitoring follow-list changes** | 24h |
+| 6 | `x_follows_changes_since` ★ | **Preferred for monitoring follow-list changes** (returns full known follow set; backfills older follows over time) | 24h |
 | 7 | `x_verify_posts` | Active deletion sweep (expensive — many requests) | 7d |
 
 Tools marked ★ should be your default for any *recurring* observation of a
@@ -51,11 +51,25 @@ Use this every time you reach for a tool:
    calls within the throttle window return cached data with
    `touched_upstream: false`.
 
-2. **"I want to know if someone followed/unfollowed accounts."**
-   → **`x_follows_changes_since`**. Pass `since_iso` and the username. The
-   proxy diffs append-only snapshots and returns `new_follows` and
-   `unfollows`. The very first call returns the entire current follow list
-   as `new_follows` with `first_observation: true`.
+2. **"I want to know who someone follows / detect new follows."**
+   → **`x_follows_changes_since`**. Pass the username (and optionally
+   `since_iso` for your own filtering). The proxy returns `followings`: the
+   full known follow set for that user, each tagged with
+   `first_observed_at` and `first_observed_via` (`"forward"` = seen on a
+   fresh page-1 walk; `"backfill"` = discovered while paginating older
+   territory). The cache fills out over time as backfill walks reach
+   deeper pages — `backfill.complete` flips to `true` once we've reached
+   the end at least once.
+
+   To find genuinely-recent new follows, filter the response by
+   `first_observed_at >= your_cutoff && first_observed_via === "forward"`.
+   Backfill discoveries are often *old* follows the proxy just learned
+   about — don't surface them as "newly followed."
+
+   Unfollow detection is **not provided** in this version. A row in
+   `followings` means we observed that follow at some point; we don't try
+   to confirm it's still active. (A future release may add an `active`
+   flag.)
 
 3. **"I need to confirm a specific tweet still exists upstream right now."**
    → **`x_verify_posts`** for batch verification of cached posts (expensive,
@@ -133,39 +147,42 @@ state. You can quote a deleted post — just label it as such using the
 
 ### `first_observation` (on `x_follows_changes_since`)
 
-- `true` → there was no prior snapshot for this user. `new_follows` lists
-  the entire current follow set, `unfollows` is empty. This is normal on
-  the first call for a user; do not treat it as a real follow event.
-- `false` → the diff is meaningful.
+- `true` → no `following_state` row existed before this call. The
+  proxy is just starting to monitor this user; the response will show
+  whatever followings page 1 returned, plus any backfill pages walked
+  this call. `backfill.complete` will be `false` unless the user has
+  fewer than ~5,000 follows.
+- `false` → the proxy has previous state for this user. New follows
+  detected via the page-1 walk; older follows continue to be backfilled.
 
-### `precision_note` (on `x_follows_changes_since`)
+### `backfill` (on `x_follows_changes_since`)
 
-A short human-readable string explaining the known imprecisions of this
-tool. Two things to know:
+```jsonc
+"backfill": {
+  "complete":       false,        // true once /following has been walked to its end at least once
+  "has_more":       true,         // mirror of !complete
+  "last_walked_at": "ISO 8601"    // when the most recent walk happened
+}
+```
 
-1. **Snapshot cadence over-inclusion.** The baseline may slightly precede
-   `since_iso`, so `new_follows` may include accounts followed shortly
-   before the requested cutoff. Surface this if the cutoff is critical.
-2. **Partial walks under-detect unfollows.** The proxy walks
-   `/2/users/:id/following` newest-first and stops paginating once it hits
-   accounts already cached. This makes repeated calls cheap, but it also
-   means: **if someone in your previous snapshot has since unfollowed and
-   was past the early-stop cutoff, the proxy will keep reporting them as
-   followed.** `new_follows` is reliable; `unfollows` is best-effort.
+- `complete: false` → the cache is still filling. New backfill pages get
+  walked at the throttle cadence. Some old follows are not yet known to
+  the proxy.
+- `complete: true` → the proxy has paginated to the end of `/following`
+  at least once for this user. All follows are known. (Subsequent
+  walks just check page 1 for new follows; early-stop fires immediately
+  in steady state.)
 
-### `latest_walk_kind` and `unfollows_may_be_stale` (on `x_follows_changes_since`)
+### `first_observed_via` per following
 
-- `latest_walk_kind` = `"complete"` → the most recent snapshot was a full
-  walk. Both `new_follows` and `unfollows` are authoritative.
-- `latest_walk_kind` = `"partial"` → the most recent snapshot stopped early
-  on a cached ID. `new_follows` is still authoritative. `unfollows` may be
-  missing accounts that were unfollowed past the early-stop point. The
-  flag `unfollows_may_be_stale: true` is set in this case.
+- `"forward"` → seen on a fresh page-1 walk. Likely a recent follow
+  relative to the proxy's observation history.
+- `"backfill"` → discovered while paginating older territory. The actual
+  follow is probably old; we just hadn't seen it yet.
 
-If you genuinely need an authoritative answer about who someone has
-unfollowed (rare — most agent use cases only care about *new* follows),
-call `x_follows_changes_since` with `force_refresh: true`. That bypasses
-the throttle gate AND walks to completion. Expensive; do it sparingly.
+When you want "new follows since X," **filter on both
+`first_observed_at >= X` AND `first_observed_via === "forward"`** to avoid
+mistaking backfilled discoveries for new follow events.
 
 ### `force_refresh_suppressed` (on `x_posts_since`, `x_follows_changes_since`)
 
@@ -278,16 +295,25 @@ field-expansion syntax: comma-separated names (e.g.
 
 ```jsonc
 {
-  "new_follows":   [{ "user_id": "111", "username": "alice", "name": "Alice" }],
-  "unfollows":     [{ "user_id": "222", "username": "bob",   "name": "Bob"   }],
-  "baseline_snapshot_at":  "2026-04-28T03:00:00.000Z",
-  "latest_snapshot_at":    "2026-05-05T03:00:00.000Z",
-  "latest_walk_kind":      "partial",        // or "complete"
-  "unfollows_may_be_stale": true,            // true when latest_walk_kind === "partial"
-  "since_iso_requested":   "2026-04-28T00:00:00Z",
-  "first_observation":     false,
-  "touched_upstream":      true,
-  "precision_note":        "Snapshots are taken on the get_user_following throttle cadence...",
+  "followings": [
+    {
+      "user_id":            "111",
+      "username":           "alice",
+      "name":               "Alice",
+      "first_observed_at":  "2026-05-14T03:00:00.000Z",
+      "first_observed_via": "forward",         // or "backfill"
+      "last_observed_at":   "2026-05-14T03:00:00.000Z"
+    }
+    // ... ordered DESC by first_observed_at
+  ],
+  "since_iso_requested":  "2026-04-28T00:00:00Z",  // echoed; null if not provided
+  "first_observation":    false,                    // true on the very first call for this user
+  "touched_upstream":     true,
+  "backfill": {
+    "complete":           false,                    // true once /following has been walked to its end
+    "has_more":           true,
+    "last_walked_at":     "2026-05-14T03:00:00.000Z"
+  },
   "gate": { "last_fetched_at": "...", "next_eligible_at": "..." }
 }
 ```
@@ -343,16 +369,32 @@ You can call `x_posts_since` more often than `next_eligible_at` if you
 want — the proxy will just return the same cached data. The throttle
 protects upstream quota, not your event loop.
 
-### Detect new follows/unfollows once a day
+### Detect new follows once a day
 
 ```
-let result = x_follows_changes_since(username, since_iso = 24h_ago_iso)
+let cutoff = 24h_ago_iso
+let result = x_follows_changes_since(username, since_iso = cutoff)
+
 if result.first_observation:
-    // first time observing — record the baseline silently, don't claim "new follows"
+    // first time observing — record silently. Don't surface anything as
+    // "new follows"; we have no prior reference. Future calls will detect
+    // genuinely-new follows on page 1.
 else:
-    surface result.new_follows and result.unfollows
-    surface result.precision_note if precision matters
+    let new_follows = result.followings.filter(f =>
+        f.first_observed_at >= cutoff && f.first_observed_via === "forward"
+    )
+    surface new_follows
+
+    if not result.backfill.complete:
+        // The proxy is still filling out older follows in the background.
+        // result.followings will grow over the next several calls until
+        // result.backfill.complete flips to true.
+        note: "follow list is still being indexed"
 ```
+
+Unfollow detection is not provided in this version; rows in `followings`
+mean "we observed this follow at some point." A future release may add
+an `active=true` flag.
 
 ### Confirm a specific tweet is still live before quoting
 

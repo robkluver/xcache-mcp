@@ -29,7 +29,7 @@ export function closeDb(): void {
   }
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** Apply incremental migrations to bring an existing DB up to SCHEMA_VERSION.
  *  The CREATE TABLE IF NOT EXISTS calls in bootstrapSchema cover fresh DBs;
@@ -44,7 +44,13 @@ function runMigrations(d: Database.Database, fromVersion: number): void {
       d.exec("ALTER TABLE follow_snapshots ADD COLUMN walk_kind TEXT NOT NULL DEFAULT 'complete'");
     }
   }
-  // Future migrations: if (fromVersion < 3) { ... }
+  // v3: new following_history + following_state tables (covered by IF NOT EXISTS
+  //     in bootstrapSchema, so no ALTER needed). The legacy follow_snapshots*
+  //     tables are left intact for backward compatibility; they're unused by
+  //     the new follows tool flow.
+  if (fromVersion < 3) {
+    // No-op; CREATE TABLE IF NOT EXISTS in bootstrapSchema handles it.
+  }
 }
 
 function bootstrapSchema(d: Database.Database): void {
@@ -135,6 +141,28 @@ function bootstrapSchema(d: Database.Database): void {
       description TEXT,
       fetched_at INTEGER NOT NULL,
       raw_json TEXT NOT NULL
+    );
+
+    -- v3: per-pair follow history + per-follower walk state.
+    -- Replaces the snapshot-diff model with a continuous-walk model that
+    -- always checks page 1 for new follows and incrementally backfills
+    -- older pages from a persisted pagination token.
+    CREATE TABLE IF NOT EXISTS following_history (
+      follower_user_id   TEXT NOT NULL,
+      followed_user_id   TEXT NOT NULL,
+      first_observed_at  INTEGER NOT NULL,
+      first_observed_via TEXT NOT NULL,        -- 'forward' | 'backfill' (future: 'audit')
+      last_observed_at   INTEGER NOT NULL,
+      PRIMARY KEY (follower_user_id, followed_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS following_history_by_follower
+      ON following_history(follower_user_id, first_observed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS following_state (
+      follower_user_id      TEXT PRIMARY KEY,
+      next_pagination_token TEXT,
+      caught_up             INTEGER NOT NULL DEFAULT 0,
+      last_walked_at        INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS proxy_meta (
@@ -588,4 +616,100 @@ export function getFollowUserDetails(ids: string[]): FollowUserDetailRow[] {
   return getDb()
     .prepare(`SELECT * FROM follow_user_details WHERE user_id IN (${placeholders})`)
     .all(...ids) as FollowUserDetailRow[];
+}
+
+// ---------- following_history + following_state (Reading B model) ----------
+
+export type FollowingObservationVia = "forward" | "backfill";
+
+export type FollowingHistoryRow = {
+  follower_user_id: string;
+  followed_user_id: string;
+  first_observed_at: number;
+  first_observed_via: FollowingObservationVia;
+  last_observed_at: number;
+};
+
+export type FollowingStateRow = {
+  follower_user_id: string;
+  next_pagination_token: string | null;
+  caught_up: number;
+  last_walked_at: number | null;
+};
+
+/** Insert a new (follower, followed) observation, or refresh last_observed_at on
+ *  an existing pair. Preserves first_observed_at and first_observed_via on
+ *  conflict — the moment we first saw a pair is immutable. */
+export function upsertFollowingObservation(args: {
+  follower_user_id: string;
+  followed_user_id: string;
+  via: FollowingObservationVia;
+  observed_at: number;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO following_history (
+         follower_user_id, followed_user_id,
+         first_observed_at, first_observed_via,
+         last_observed_at
+       )
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(follower_user_id, followed_user_id) DO UPDATE SET
+         last_observed_at = excluded.last_observed_at`,
+    )
+    .run(
+      args.follower_user_id,
+      args.followed_user_id,
+      args.observed_at,
+      args.via,
+      args.observed_at,
+    );
+}
+
+export function getFollowingHistory(follower_user_id: string): FollowingHistoryRow[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM following_history
+       WHERE follower_user_id = ?
+       ORDER BY first_observed_at DESC`,
+    )
+    .all(follower_user_id) as FollowingHistoryRow[];
+}
+
+export function followedUserIdsForFollower(follower_user_id: string): Set<string> {
+  const rows = getDb()
+    .prepare(`SELECT followed_user_id FROM following_history WHERE follower_user_id = ?`)
+    .all(follower_user_id) as { followed_user_id: string }[];
+  return new Set(rows.map((r) => r.followed_user_id));
+}
+
+export function getFollowingState(follower_user_id: string): FollowingStateRow | undefined {
+  return getDb()
+    .prepare(`SELECT * FROM following_state WHERE follower_user_id = ?`)
+    .get(follower_user_id) as FollowingStateRow | undefined;
+}
+
+export function setFollowingState(args: {
+  follower_user_id: string;
+  next_pagination_token: string | null;
+  caught_up: boolean;
+  last_walked_at: number;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO following_state (
+         follower_user_id, next_pagination_token, caught_up, last_walked_at
+       )
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(follower_user_id) DO UPDATE SET
+         next_pagination_token = excluded.next_pagination_token,
+         caught_up = excluded.caught_up,
+         last_walked_at = excluded.last_walked_at`,
+    )
+    .run(
+      args.follower_user_id,
+      args.next_pagination_token,
+      args.caught_up ? 1 : 0,
+      args.last_walked_at,
+    );
 }

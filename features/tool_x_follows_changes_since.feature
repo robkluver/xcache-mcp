@@ -1,180 +1,171 @@
 # language: en
 @tool @x_follows_changes_since @monitoring
-Feature: Tool x_follows_changes_since (★ preferred for monitoring follow-list changes)
+Feature: Tool x_follows_changes_since (★ preferred for follow-list monitoring)
   As an MCP agent
-  I want to detect new follows and unfollows for a target user over time
-  So that I can track changes without re-walking and re-comparing on every call.
+  I want a continually-growing cache of who a user follows
+  So that I can detect new follows promptly while the proxy fills out older follows incrementally over time.
 
   # Operation:    get_user_following
   # Default gate: 24h
-  # Account ID:   resolved user_id
-  # Upstream:     GET /2/users/:id/following (paginated newest-first; first-observation
-  #                walks capped at 5 pages, subsequent walks early-stop on cached IDs
-  #                with a defensive cap of 100 pages)
+  # Account ID:   resolved user_id (the follower we are monitoring)
+  # Upstream:     GET /2/users/:id/following
+  #               Each call walks at most 5 pages: page 1 with early-stop on
+  #               first already-cached follow, then up to 4 more pages from a
+  #               persisted pagination_token until backfill.complete = true.
+  # Storage:      following_history (one row per (follower, followed) pair,
+  #               immutable first_observed_at + first_observed_via)
+  #               + following_state (next_pagination_token, caught_up).
 
   Background:
     Given the proxy is running with X_BEARER_TOKEN set
     And the throttle config maps "get_user_following" to a 24h interval
 
-  # ---------- Snapshot capture ----------
+  # ---------- First observation ----------
 
-  Scenario: First observation walks the entire following list and records a snapshot
-    Given there are no follow_snapshots rows for the user
+  Scenario: First observation walks page 1 + up to 4 more pages of older territory
+    Given there is no following_state row for the user
+    And the gate is open
+    When the agent calls x_follows_changes_since with {"username": "..."}
+    Then the proxy walks page 1 with no token
+    And it walks up to 4 more pages from page 1's next_token
+    And every observed (follower, followed) pair is upserted into following_history
+    And the first observation entries are tagged first_observed_via = "forward" if seen on page 1
+    And entries observed on pages 2-5 are tagged first_observed_via = "backfill"
+    And following_state is written with next_pagination_token = the deepest token seen (or null if walk reached end)
+    And following_state.caught_up is true iff the walk reached the end of /following
+    And response.first_observation is true
+    And response.backfill.complete reflects whether the walk reached the end
+
+  # ---------- Steady-state walk ----------
+
+  Scenario: Subsequent walk: page 1 with early-stop on first cached follow
+    Given a following_history row exists for at least one of the user's followings
     And the gate is open
     When the agent calls x_follows_changes_since
-    Then the proxy walks /2/users/:id/following up to the first-observation cap (5 pages)
-    And a new follow_snapshots row is inserted with taken_at = now
-    And follow_snapshot_members rows are inserted for every followed account
-    And follow_user_details is upserted for every member returned in the expansion
-    And response.first_observation is true
-    And response.new_follows contains every member of the snapshot
-    And response.unfollows is empty
+    Then page 1 walks until it sees a follow already in following_history
+    And it stops walking page 1 at that point
+    And new follows on page 1 are upserted with first_observed_via = "forward" and a fresh first_observed_at
+    And existing follows have only their last_observed_at updated; first_observed_at and first_observed_via are preserved
 
-  Scenario: Throttle dedup within 24h
+  Scenario: Backfill continues from the persisted token
+    Given following_state.caught_up is false
+    And following_state.next_pagination_token is "tok_42"
+    And the gate is open
+    When the agent calls x_follows_changes_since
+    Then after the page-1 walk, the proxy walks up to 4 more pages from "tok_42"
+    And those observations are tagged first_observed_via = "backfill" (only on insert; preserved on conflict)
+    And following_state.next_pagination_token is updated to the deepest token seen this call
+    And if the walk reached the end of /following, following_state.caught_up is set to true and the token is set to null
+
+  Scenario: Backfill is skipped once caught_up is true
+    Given following_state.caught_up is true
+    When the agent calls x_follows_changes_since
+    Then only page 1 is walked (subject to early-stop)
+    And no backfill pages are fetched
+    And the upstream cost approaches 1 page per call
+
+  # ---------- Walk caps ----------
+
+  Scenario: A single call walks at most 5 upstream pages
+    Given there is no early-stop hit on page 1 (e.g., first observation)
+    When the agent calls x_follows_changes_since
+    Then the proxy walks at most 5 pages total: page 1 + up to 4 backfill pages
+    And the upper bound holds even on first observation for a power user with thousands of follows
+    # The cache fills out over multiple weekly walks.
+
+  # ---------- Throttling ----------
+
+  Scenario: Gate dedups within 24h
     Given a successful x_follows_changes_since call was made 1 hour ago
     When the agent calls again
     Then no upstream call is issued
     And response.touched_upstream is false
-    And the diff is computed against the existing snapshots
-    And gate.next_eligible_at is approximately 23h from now
+    And the response returns the cached followings unchanged
 
-  Scenario: force_refresh bypasses the gate
+  Scenario: force_refresh bypasses the gate (if policy allows)
     Given the gate is closed (interval not elapsed)
+    And tools.permit_force_refresh is true
     When the agent calls with {"force_refresh": true}
-    Then a fresh snapshot is taken and inserted
+    Then a fresh walk happens despite the gate
 
-  # ---------- Diffing ----------
-
-  Scenario: Subsequent call computes new_follows and unfollows by set diff
-    Given an earlier snapshot S1 has members {A, B, C}
-    And the latest snapshot S2 has members {B, C, D, E}
-    When x_follows_changes_since is called with since_iso between S1 and S2
-    Then response.new_follows contains user IDs {D, E}
-    And response.unfollows contains user IDs {A}
-    And response.baseline_snapshot_at is S1's taken_at (ISO)
-    And response.latest_snapshot_at is S2's taken_at (ISO)
-    And response.first_observation is false
-
-  Scenario: FollowDetail enrichment via follow_user_details
-    Given user details for {D, E, A} were stored in earlier snapshot expansions
-    When the diff returns user IDs
-    Then each FollowDetail entry has user_id, username, name from follow_user_details
-    And missing details fall back to {user_id, username: null, name: null}
-
-  Scenario: Baseline selection uses snapshotAtOrBefore(since_iso)
-    Given snapshots exist at taken_at = T1 < T2 < T3
-    When the agent calls with since_iso between T2 and T3
-    Then the baseline is S2 (the newest snapshot at-or-before since_iso)
-    And the latest snapshot is S3
-
-  Scenario: No baseline before since_iso → first_observation true
-    Given snapshots exist only at T2 and later
-    When the agent calls with since_iso = T1 (earlier than any snapshot)
-    Then response.baseline_snapshot_at is null
-    And response.first_observation is true
-    And response.new_follows contains every member of the latest snapshot
-    And response.unfollows is empty
-
-  # ---------- Precision note ----------
-
-  Scenario: Response includes a precision_note explaining over-inclusion
-    When the agent receives any non-empty diff
-    Then response.precision_note is a human-readable string
-    And it explains that the baseline snapshot may be from before since_iso
-    And it acknowledges that new_follows can over-include accounts followed slightly before the cutoff
-
-  # ---------- Early-stop walk (cost optimization) ----------
-
-  Scenario: First observation walks to completion (nothing to early-stop on)
-    Given there are no prior snapshots for the user
-    When the agent calls x_follows_changes_since
-    Then the proxy walks /2/users/:id/following until next_token is absent (or MAX_PAGES)
-    And the resulting snapshot's walk_kind is "complete"
-    And response.latest_walk_kind is "complete"
-    And response.unfollows_may_be_stale is false
-
-  Scenario: Subsequent walk stops on the first page that hits a known follow
-    Given a previous snapshot for the user has members {A, B, C, D}
-    And X returns followings newest-first
-    When the agent calls x_follows_changes_since
-    And page 1 contains user IDs {F, E, A, X}
-    Then the walk stops after page 1 (early-stop on A)
-    And the new snapshot's walk_kind is "partial"
-    And the new snapshot's members include {A, B, C, D, F, E, X} (prior augmented with this walk)
-    And response.latest_walk_kind is "partial"
-    And response.unfollows_may_be_stale is true
-
-  Scenario: Partial walks under-detect unfollows by design
-    Given a previous snapshot has members {A, B, C, D}
-    And user has actually unfollowed D and followed E
-    When the agent calls x_follows_changes_since (early-stop hits A on page 1)
-    Then response.new_follows includes E (correctly detected)
-    But response.unfollows does NOT include D (we never observed D's absence past the early-stop)
-    And response.unfollows_may_be_stale is true to flag this limitation
-
-  Scenario: force_refresh disables early-stop and walks to completion
-    Given a previous snapshot exists for the user
-    When the agent calls x_follows_changes_since with {"force_refresh": true}
-    Then the proxy bypasses the throttle gate
-    And it ignores the early-stop heuristic
-    And it walks /2/users/:id/following to its end (or MAX_PAGES)
-    And the new snapshot's walk_kind is "complete"
-    And response.unfollows is authoritative
-
-  # ---------- Pagination safety ----------
-
-  Scenario: First-observation page cap bounds the cold-start spike
-    Given there are no prior snapshots for the user
-    And upstream keeps returning next_token indefinitely (pathological case)
-    When the agent calls x_follows_changes_since
-    Then the proxy stops walking after at most 5 pages on first observation
-    And the resulting snapshot's walk_kind is "partial"
-    # We accept a partial baseline rather than potentially making 100 calls for
-    # a brand-new account. Subsequent calls rely on early-stop to stay cheap.
-
-  Scenario: Defensive page cap of 100 prevents runaway pagination on subsequent walks
-    Given a previous snapshot exists for the user
-    And early-stop never fires (none of the new follows are in priorMembers)
-    When the agent calls x_follows_changes_since
-    Then the proxy stops walking after at most 100 pages
-    And no infinite loop occurs
-
-  Scenario: Mid-pagination error discards the partial snapshot
-    When pagination fails at page 5 of an in-progress walk
-    Then no new follow_snapshots row is inserted
-    And no follow_snapshot_members rows are inserted
-    And a fetch_gate error row is written with the upstream status
+  Scenario: force_refresh is ignored when policy disallows it
+    Given tools.permit_force_refresh is false
+    When the agent calls with {"force_refresh": true}
+    Then the gate is honored as if force_refresh were false
+    And response.force_refresh_suppressed is true
 
   # ---------- Response shape ----------
 
   Scenario: Response includes the standard fields
-    When the agent receives any response
+    When the agent receives any successful response
     Then it has the fields:
-      | new_follows             |
-      | unfollows               |
-      | baseline_snapshot_at    |
-      | latest_snapshot_at      |
-      | latest_walk_kind        |
-      | unfollows_may_be_stale  |
-      | since_iso_requested     |
-      | first_observation       |
-      | touched_upstream        |
-      | precision_note          |
-      | gate                    |
+      | followings (array)                  |
+      | since_iso_requested (echoed or null)|
+      | first_observation (boolean)         |
+      | touched_upstream (boolean)          |
+      | backfill (object)                   |
+      | gate (object)                       |
+    And each followings entry has:
+      | user_id            |
+      | username           |
+      | name               |
+      | first_observed_at  |
+      | first_observed_via |
+      | last_observed_at   |
+    And followings is ordered DESC by first_observed_at
+
+  Scenario: backfill object exposes cache-completion progress
+    When the agent receives a response
+    Then response.backfill is shaped like:
+      """
+      { "complete": boolean, "has_more": boolean, "last_walked_at": ISO|null }
+      """
+    And complete is true once the proxy has paginated to the end of /following at least once
+    And has_more is the negation of complete
+
+  # ---------- Detecting new follows ----------
+
+  Scenario: Agent computes new follows by filtering on (forward + recent)
+    Given a populated followings list with mixed first_observed_via values
+    When the agent wants follows added in the last 24h
+    Then the correct filter is:
+      """
+      followings.filter(f =>
+        f.first_observed_at >= cutoff && f.first_observed_via === "forward")
+      """
+    # Backfilled follows have a recent first_observed_at but represent
+    # follows the proxy just LEARNED about, not necessarily new follow events.
+
+  # ---------- No unfollow detection in this version ----------
+
+  Scenario: Unfollows are not detected
+    Given a user actually unfollowed an account they previously followed
+    When subsequent x_follows_changes_since walks happen
+    Then the unfollowed account remains in followings
+    And the response has no unfollows field
+    # A future release may add an active=true flag, populated by an audit walk
+    # that runs at a much slower cadence (e.g. 6 months).
 
   # ---------- Errors ----------
 
-  Scenario: Invalid since_iso returns a structured error
-    When the agent calls with {"since_iso": "not-a-date"}
+  Scenario: Invalid since_iso (when provided) returns a structured error
+    When the agent calls with {"username": "u", "since_iso": "not-a-date"}
     Then the response is {"error": "invalid_since_iso", "message": "..."}
 
   Scenario: Unknown username returns user_not_found
     When the upstream user resolution returns 404
     Then the response is {"error": "user_not_found", "message": "..."}
 
+  Scenario: Mid-walk error closes the gate via error_retry_intervals
+    When pagination fails at page 3
+    Then partial observations from earlier pages are persisted (history is append-only)
+    And following_state is NOT updated (we'd lose pagination position)
+    And a fetch_gate error row is written with the upstream status
+
   # ---------- Description ----------
 
-  Scenario: Description begins with a star and warns against direct /following walks
+  Scenario: Description marks the tool as preferred and explains the model
     When the agent reads the tool's description
-    Then it emphasizes monitoring follow-list changes over time
-    And it explicitly warns against using x_raw_get to walk /2/users/:id/following
+    Then it explains the page-1 + backfill model
+    And it warns against using x_raw_get to walk /following directly
+    And it documents that unfollow detection is not provided in this version

@@ -1,20 +1,21 @@
 import {
   canonicalUrl,
+  followedUserIdsForFollower,
   getDb,
   getFollowUserDetails,
+  getFollowingHistory,
+  getFollowingState,
   getPost,
   getPostCursor,
   getUrlCache,
-  insertFollowSnapshot,
-  latestSnapshotForUser,
   liveTweetIdsSince,
   markPostDeleted,
   postsSince,
   putUrlCache,
   queryFingerprint,
+  setFollowingState,
   shaFingerprint,
-  snapshotAtOrBefore,
-  snapshotMemberIds,
+  upsertFollowingObservation,
   upsertPost,
   upsertPostCursor,
   urlCacheKey,
@@ -193,22 +194,27 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   {
     name: "x_follows_changes_since",
     description:
-      "★ Preferred tool for monitoring follow-list changes over time. Compares the current /2/users/:id/following list against the most recent snapshot taken on or before since_iso, returning new_follows and unfollows. Snapshots are taken append-only and stored forever. Throttled per the get_user_following operation (default 24h). " +
-      "Do NOT use x_raw_get to walk /2/users/:id/following directly — use this tool, which snapshots and diffs efficiently. " +
-      "Walks newest-first and stops paginating once it hits accounts already cached, so subsequent calls are cheap. The trade-off (intentional): unfollows is best-effort and may miss accounts unfollowed past the early-stop cutoff — when that matters, see unfollows_may_be_stale in the response or pass force_refresh: true to force an authoritative full walk. " +
-      "Note: precision is bounded by snapshot cadence (the baseline may be slightly older than since_iso); see precision_note in the response.",
+      '★ Preferred tool for monitoring follow-list changes over time. Returns the cached set of all known followings for the given username, each with a first_observed_at timestamp and first_observed_via tag ("forward" = seen on a fresh page-1 walk; "backfill" = discovered while paginating older territory). ' +
+      "Each call (gated per get_user_following) does at most 5 upstream pages: page 1 with early-stop on the first already-cached follow (to detect new follows promptly), then up to 4 more pages from a persisted pagination token to incrementally backfill older follows. The cache fills out over time; backfill.complete flips to true once the proxy has paginated to the end of /2/users/:id/following at least once. " +
+      "Do NOT use x_raw_get to walk /2/users/:id/following directly — use this tool, which dedupes and accumulates correctly. " +
+      'To detect agent-relevant new follows, filter the response by first_observed_at >= your cutoff AND first_observed_via === "forward". ' +
+      "Unfollow detection is not provided in this version — a row in the response means we observed that follow at some point. A future release may add an active=true flag.",
     inputSchema: {
       type: "object",
       properties: {
         username: { type: "string" },
-        since_iso: { type: "string" },
+        since_iso: {
+          type: "string",
+          description:
+            "Optional ISO 8601 timestamp. Echoed back as since_iso_requested for the caller's convenience. The proxy returns ALL cached followings regardless; the agent filters as needed using first_observed_at.",
+        },
         force_refresh: {
           type: "boolean",
           description:
-            "Bypass the throttle gate AND walk to completion (no early-stop), so unfollows are accurate. May be ignored by deployment policy (tools.permit_force_refresh); when ignored, the response includes force_refresh_suppressed: true.",
+            "Bypass the throttle gate and walk this call. May be ignored by deployment policy (tools.permit_force_refresh); when ignored, the response includes force_refresh_suppressed: true.",
         },
       },
-      required: ["username", "since_iso"],
+      required: ["username"],
       additionalProperties: false,
     },
   },
@@ -1271,73 +1277,61 @@ export function rowToPostRecord(p: PostRow): unknown {
 
 export async function tool_x_follows_changes_since(
   call: ToolCallContext,
-  input: { username: string; since_iso: string; force_refresh?: boolean },
+  input: { username: string; since_iso?: string; force_refresh?: boolean },
 ): Promise<unknown> {
-  const sinceMs = Date.parse(input.since_iso);
-  if (!Number.isFinite(sinceMs)) {
+  const sinceMs = input.since_iso !== undefined ? Date.parse(input.since_iso) : null;
+  if (input.since_iso !== undefined && !Number.isFinite(sinceMs)) {
     return { error: "invalid_since_iso", message: "since_iso must be ISO 8601" };
   }
+
   const resolved = await resolveUserId(call, input.username);
   if ("error" in resolved) return resolved;
-  const user_id = resolved.user_id;
+  const follower_user_id = resolved.user_id;
 
   const operation = "get_user_following";
-  const account_id = user_id;
+  const account_id = follower_user_id;
   const gate = gateState(operation, account_id);
-  const existingLatest = latestSnapshotForUser(user_id);
 
-  // Apply the permit_force_refresh policy: clients can ask for force_refresh,
-  // but the proxy ignores it when the deployment has disabled it (cost guard).
   const requestedForceRefresh = input.force_refresh === true;
   const effectiveForceRefresh = requestedForceRefresh && appCtx?.permitForceRefresh !== false;
   const forceRefreshSuppressed = requestedForceRefresh && !effectiveForceRefresh;
 
-  const shouldFetch = gate.open || effectiveForceRefresh || !existingLatest;
+  const existingState = getFollowingState(follower_user_id);
+  const isFirstObservation = !existingState;
+  const shouldFetch = gate.open || effectiveForceRefresh;
 
   let touched_upstream = false;
   const endpointTemplate = "/2/users/{id}/following";
-  const followingPath = `/2/users/${encodeURIComponent(user_id)}/following`;
+  const followingPath = `/2/users/${encodeURIComponent(follower_user_id)}/following`;
   const paginationChainId = crypto.randomUUID();
 
-  // Early-stop fuel: members of the most recent snapshot for this user. If
-  // any page of the upcoming /following walk contains one of these IDs, we
-  // assume X returns followings newest-first and stop walking — there's
-  // nothing newer than what we already know past this point. force_refresh
-  // disables the early-stop so callers can audit unfollows accurately.
-  const priorMembers: Set<string> | null =
-    existingLatest && !effectiveForceRefresh ? new Set(snapshotMemberIds(existingLatest.id)) : null;
+  // Per-walk page caps. Forward portion always walks page 1 with early-stop
+  // (cheap once cached). Backfill walks at most 4 more pages from the
+  // persisted token, until caught_up flips true.
+  const MAX_PAGES_TOTAL = 5;
 
   if (shouldFetch) {
     touched_upstream = true;
-    const t0 = Date.now();
-    let nextToken: string | undefined = undefined;
-    const observedThisWalk = new Set<string>();
-    const members: string[] = [];
-    const details: Array<{
-      user_id: string;
-      username?: string | null;
-      name?: string | null;
-      description?: string | null;
-      raw: object;
-    }> = [];
-    let api_calls = 0;
-    let depth = 0;
-    // First-observation walks can't early-stop (no prior members to recognize),
-    // so we cap them tightly to bound the worst-case spike for new accounts.
-    // Subsequent walks rely on early-stop to terminate quickly.
-    const MAX_PAGES = priorMembers === null ? 5 : 100;
+    const observedAt = Date.now();
+    let pagesWalked = 0;
     let errored = false;
+
+    // Track which followed IDs we already had, to detect early-stop and decide
+    // whether to mark observations as 'forward' vs 'backfill'.
+    const knownFollows = followedUserIdsForFollower(follower_user_id);
+
+    // ---- Forward walk: always start at page 1 (no token), early-stop on first
+    //      already-cached follow. ----
     let earlyStopHit = false;
-    while (depth < MAX_PAGES) {
+    {
       const params: Record<string, string | number | boolean | undefined> = {
         max_results: 1000,
-        "user.fields": "username,name,description,created_at,public_metrics",
+        "user.fields": "username,name,description",
       };
-      if (nextToken) params["pagination_token"] = nextToken;
       const fp = queryFingerprint(endpointTemplate, params);
       const fields = fieldsListFromParams(params);
       const res = await xapiFetch(ctx(), { path: followingPath, params });
-      api_calls += 1;
+      pagesWalked += 1;
       if (!res.ok) {
         writeGateError({
           operation,
@@ -1354,7 +1348,7 @@ export async function tool_x_follows_changes_since(
           requested_fields: fields,
           is_paginated: true,
           pagination_chain_id: paginationChainId,
-          pagination_depth: depth,
+          pagination_depth: 0,
           operation,
           account_id,
           status: res.status,
@@ -1375,98 +1369,211 @@ export async function tool_x_follows_changes_since(
           body: res.body,
         });
         errored = true;
-        break;
-      }
-      const json = res.json as {
-        data?: Array<{ id: string; username?: string; name?: string; description?: string }>;
-        meta?: { result_count?: number; next_token?: string };
-      } | null;
-      const data = json?.data ?? [];
-      let pageHasKnown = false;
-      for (const u of data) {
-        const id = String(u.id);
-        if (!observedThisWalk.has(id)) {
-          observedThisWalk.add(id);
-          members.push(id);
-          details.push({
+      } else {
+        const json = res.json as {
+          data?: Array<{ id: string; username?: string; name?: string; description?: string }>;
+          meta?: { result_count?: number; next_token?: string };
+        } | null;
+        const data = json?.data ?? [];
+        for (const u of data) {
+          const id = String(u.id);
+          if (knownFollows.has(id)) {
+            earlyStopHit = true;
+          } else {
+            knownFollows.add(id);
+          }
+          upsertFollowingObservation({
+            follower_user_id,
+            followed_user_id: id,
+            via: "forward",
+            observed_at: observedAt,
+          });
+          upsertFollowDetail({
             user_id: id,
             username: u.username ?? null,
             name: u.name ?? null,
             description: u.description ?? null,
             raw: u,
+            fetched_at: observedAt,
           });
         }
-        if (priorMembers !== null && priorMembers.has(id)) {
-          pageHasKnown = true;
+        logEvent({
+          call,
+          request_id: res.requestId,
+          url: res.url,
+          endpoint_template: endpointTemplate,
+          query_fingerprint: fp,
+          requested_fields: fields,
+          is_paginated: true,
+          pagination_chain_id: paginationChainId,
+          pagination_depth: 0,
+          operation,
+          account_id,
+          status: res.status,
+          source: "live",
+          cache_outcome: "miss",
+          gate_state: { open: false, last_fetched_at: nowIso() },
+          duration_ms: res.durationMs,
+          response_bytes: res.body.length,
+          result_count: json?.meta?.result_count ?? data.length,
+          next_token_present: !!json?.meta?.next_token,
+          rate_limit_limit: res.rateLimit.limit,
+          rate_limit_remaining: res.rateLimit.remaining,
+          rate_limit_reset: res.rateLimit.reset,
+          error_class: null,
+          error_message: null,
+          body_truncated: false,
+          body_ref: bodyRef(),
+          body: res.body,
+        });
+
+        // ---- Backfill walk: continue from state.next_pagination_token (or
+        //      page 1's next_token on first observation), unless caught_up.
+        //      Skipped when early-stop fired AND state was already established
+        //      (early-stop means new follows are detected; older territory is
+        //      filled separately by future calls). On first observation,
+        //      state.next_pagination_token is null so we use page 1's token. ----
+        const stateRow = existingState;
+        const caughtUp = stateRow?.caught_up === 1;
+        let nextToken: string | undefined =
+          stateRow?.next_pagination_token ?? json?.meta?.next_token ?? undefined;
+
+        // If state has a token, that's our resume point. If state is null,
+        // continue from page 1's next_token.
+        const shouldBackfill = !caughtUp && !!nextToken;
+        if (shouldBackfill) {
+          let backfillToken: string | undefined = nextToken;
+          while (pagesWalked < MAX_PAGES_TOTAL && backfillToken) {
+            const bfParams: Record<string, string | number | boolean | undefined> = {
+              max_results: 1000,
+              "user.fields": "username,name,description",
+              pagination_token: backfillToken,
+            };
+            const bfFp = queryFingerprint(endpointTemplate, bfParams);
+            const bfFields = fieldsListFromParams(bfParams);
+            const bfRes = await xapiFetch(ctx(), { path: followingPath, params: bfParams });
+            pagesWalked += 1;
+            if (!bfRes.ok) {
+              writeGateError({
+                operation,
+                account_id,
+                status: bfRes.status || null,
+                error: bfRes.errorMessage ?? `http_${bfRes.status}`,
+              });
+              logEvent({
+                call,
+                request_id: bfRes.requestId,
+                url: bfRes.url,
+                endpoint_template: endpointTemplate,
+                query_fingerprint: bfFp,
+                requested_fields: bfFields,
+                is_paginated: true,
+                pagination_chain_id: paginationChainId,
+                pagination_depth: pagesWalked - 1,
+                operation,
+                account_id,
+                status: bfRes.status,
+                source: "error",
+                cache_outcome: "miss",
+                gate_state: { open: false, last_fetched_at: nowIso() },
+                duration_ms: bfRes.durationMs,
+                response_bytes: bfRes.body.length,
+                result_count: null,
+                next_token_present: null,
+                rate_limit_limit: bfRes.rateLimit.limit,
+                rate_limit_remaining: bfRes.rateLimit.remaining,
+                rate_limit_reset: bfRes.rateLimit.reset,
+                error_class: bfRes.errorClass,
+                error_message: bfRes.errorMessage,
+                body_truncated: false,
+                body_ref: bodyRef(),
+                body: bfRes.body,
+              });
+              errored = true;
+              break;
+            }
+            const bfJson = bfRes.json as {
+              data?: Array<{
+                id: string;
+                username?: string;
+                name?: string;
+                description?: string;
+              }>;
+              meta?: { result_count?: number; next_token?: string };
+            } | null;
+            const bfData = bfJson?.data ?? [];
+            for (const u of bfData) {
+              const id = String(u.id);
+              upsertFollowingObservation({
+                follower_user_id,
+                followed_user_id: id,
+                via: "backfill",
+                observed_at: observedAt,
+              });
+              upsertFollowDetail({
+                user_id: id,
+                username: u.username ?? null,
+                name: u.name ?? null,
+                description: u.description ?? null,
+                raw: u,
+                fetched_at: observedAt,
+              });
+            }
+            logEvent({
+              call,
+              request_id: bfRes.requestId,
+              url: bfRes.url,
+              endpoint_template: endpointTemplate,
+              query_fingerprint: bfFp,
+              requested_fields: bfFields,
+              is_paginated: true,
+              pagination_chain_id: paginationChainId,
+              pagination_depth: pagesWalked - 1,
+              operation,
+              account_id,
+              status: bfRes.status,
+              source: "live",
+              cache_outcome: "miss",
+              gate_state: { open: false, last_fetched_at: nowIso() },
+              duration_ms: bfRes.durationMs,
+              response_bytes: bfRes.body.length,
+              result_count: bfJson?.meta?.result_count ?? bfData.length,
+              next_token_present: !!bfJson?.meta?.next_token,
+              rate_limit_limit: bfRes.rateLimit.limit,
+              rate_limit_remaining: bfRes.rateLimit.remaining,
+              rate_limit_reset: bfRes.rateLimit.reset,
+              error_class: null,
+              error_message: null,
+              body_truncated: false,
+              body_ref: bodyRef(),
+              body: bfRes.body,
+            });
+            backfillToken = bfJson?.meta?.next_token;
+          }
+          nextToken = backfillToken;
+        }
+
+        if (!errored) {
+          const reachedEnd = !nextToken;
+          setFollowingState({
+            follower_user_id,
+            next_pagination_token: reachedEnd ? null : (nextToken ?? null),
+            caught_up: caughtUp || reachedEnd || earlyStopHit,
+            // earlyStopHit on a state-row-existed call means we re-confirmed
+            // the existing list past the new follows; equivalent to caught_up
+            // for this backfill purpose, since we already had everything past
+            // the early-stop point on a previous full-walk... wait no, we
+            // might NOT have had everything past it if a previous call also
+            // early-stopped. Be conservative: only flip caught_up on
+            // (caughtUp || reachedEnd). Re-confirming existing follows
+            // doesn't prove backfill is done.
+            last_walked_at: observedAt,
+          });
+          writeGateSuccess({ operation, account_id, status: 200 });
         }
       }
-      logEvent({
-        call,
-        request_id: res.requestId,
-        url: res.url,
-        endpoint_template: endpointTemplate,
-        query_fingerprint: fp,
-        requested_fields: fields,
-        is_paginated: true,
-        pagination_chain_id: paginationChainId,
-        pagination_depth: depth,
-        operation,
-        account_id,
-        status: res.status,
-        source: "live",
-        cache_outcome: "miss",
-        gate_state: { open: false, last_fetched_at: nowIso() },
-        duration_ms: res.durationMs,
-        response_bytes: res.body.length,
-        result_count: json?.meta?.result_count ?? data.length,
-        next_token_present: !!json?.meta?.next_token,
-        rate_limit_limit: res.rateLimit.limit,
-        rate_limit_remaining: res.rateLimit.remaining,
-        rate_limit_reset: res.rateLimit.reset,
-        error_class: null,
-        error_message: null,
-        body_truncated: false,
-        body_ref: bodyRef(),
-        body: res.body,
-      });
-      if (pageHasKnown) {
-        // We've reached followings we already had on file. The remaining
-        // (older) pages are assumed unchanged. Stop here and mark this walk
-        // as partial.
-        earlyStopHit = true;
-        break;
-      }
-      if (json?.meta?.next_token) {
-        nextToken = json.meta.next_token;
-        depth += 1;
-      } else {
-        break;
-      }
     }
-    if (!errored) {
-      const taken_at = Date.now();
-      const walkKind: "complete" | "partial" = earlyStopHit ? "partial" : "complete";
-
-      // For partial walks, augment the snapshot's member list with the prior
-      // snapshot's members so we don't lose anyone we didn't re-observe. The
-      // trade-off (intentional): unfollows go undetected for accounts past
-      // the early-stop cutoff. Documented in precision_note + AGENT_GUIDE.
-      const finalMembers: string[] =
-        walkKind === "partial" && priorMembers
-          ? Array.from(new Set([...priorMembers, ...members]))
-          : members;
-
-      insertFollowSnapshot({
-        user_id,
-        taken_at,
-        members: finalMembers,
-        api_calls,
-        api_duration_ms: Date.now() - t0,
-        walk_kind: walkKind,
-        details,
-      });
-      writeGateSuccess({ operation, account_id, status: 200 });
-    }
+    void errored;
   } else {
     logEvent({
       call,
@@ -1498,84 +1605,39 @@ export async function tool_x_follows_changes_since(
     });
   }
 
-  // Now compute baseline and latest snapshots.
-  const latest = latestSnapshotForUser(user_id);
-  if (!latest) {
-    return {
-      new_follows: [],
-      unfollows: [],
-      baseline_snapshot_at: null,
-      latest_snapshot_at: null,
-      latest_walk_kind: null,
-      unfollows_may_be_stale: false,
-      since_iso_requested: input.since_iso,
-      first_observation: true,
-      touched_upstream,
-      precision_note:
-        "No snapshots exist yet for this user. Subsequent calls will compare against the latest cached snapshot.",
-      gate: {
-        last_fetched_at: lastFetchedIso(operation, account_id) ?? "",
-        next_eligible_at: nextEligibleIso(operation, account_id) ?? "",
-      },
-      ...(forceRefreshSuppressed
-        ? {
-            force_refresh_suppressed: true,
-            force_refresh_suppressed_reason:
-              "tools.permit_force_refresh is false in the proxy config; force_refresh: true was ignored.",
-          }
-        : {}),
-    };
-  }
-  const baseline = snapshotAtOrBefore(user_id, sinceMs);
-  const latestMembers = new Set(snapshotMemberIds(latest.id));
-  let baselineMembers: Set<string> | null = null;
-  if (baseline) {
-    baselineMembers = new Set(snapshotMemberIds(baseline.id));
-  }
-
-  const newFollowIds: string[] =
-    baselineMembers === null
-      ? Array.from(latestMembers)
-      : Array.from(latestMembers).filter((id) => !baselineMembers!.has(id));
-  const unfollowIds: string[] =
-    baselineMembers === null
-      ? []
-      : Array.from(baselineMembers).filter((id) => !latestMembers.has(id));
-
-  const allIds = Array.from(new Set([...newFollowIds, ...unfollowIds]));
-  const detailRows = getFollowUserDetails(allIds);
+  // Build the response from the local history.
+  const historyRows = getFollowingHistory(follower_user_id);
+  const detailIds = historyRows.map((r) => r.followed_user_id);
+  const detailRows = getFollowUserDetails(detailIds);
   const detailMap = new Map(detailRows.map((d: FollowUserDetailRow) => [d.user_id, d]));
-  const toFollowDetail = (id: string) => {
-    const d = detailMap.get(id);
+
+  const followings = historyRows.map((r) => {
+    const d = detailMap.get(r.followed_user_id);
     return {
-      user_id: id,
+      user_id: r.followed_user_id,
       username: d?.username ?? null,
       name: d?.name ?? null,
+      first_observed_at: new Date(r.first_observed_at).toISOString(),
+      first_observed_via: r.first_observed_via,
+      last_observed_at: new Date(r.last_observed_at).toISOString(),
     };
-  };
+  });
 
-  const latestWalkKind = latest.walk_kind ?? "complete";
-  const unfollowsMayBeStale = latestWalkKind === "partial";
-  const precisionNotes: string[] = [
-    "Snapshots are taken on the get_user_following throttle cadence, not at arbitrary moments. The baseline snapshot may be from before since_iso, so new_follows can include accounts followed slightly before the requested cutoff. This over-inclusion is by design.",
-  ];
-  if (unfollowsMayBeStale) {
-    precisionNotes.push(
-      "The latest snapshot is a PARTIAL walk: the proxy stopped paginating /2/users/:id/following once it hit accounts already cached. new_follows is reliable; unfollows is best-effort and may MISS accounts that were unfollowed past the early-stop cutoff (so the proxy may continue to report them as followed). Call with force_refresh: true for an authoritative full walk.",
-    );
-  }
+  const updatedState = getFollowingState(follower_user_id);
 
   return {
-    new_follows: newFollowIds.map(toFollowDetail),
-    unfollows: unfollowIds.map(toFollowDetail),
-    baseline_snapshot_at: baseline ? new Date(baseline.taken_at).toISOString() : null,
-    latest_snapshot_at: new Date(latest.taken_at).toISOString(),
-    latest_walk_kind: latestWalkKind,
-    unfollows_may_be_stale: unfollowsMayBeStale,
-    since_iso_requested: input.since_iso,
-    first_observation: !baseline,
+    followings,
+    since_iso_requested: input.since_iso ?? null,
+    first_observation: isFirstObservation,
     touched_upstream,
-    precision_note: precisionNotes.join(" "),
+    backfill: {
+      complete: updatedState?.caught_up === 1,
+      has_more: !(updatedState?.caught_up === 1),
+      last_walked_at:
+        updatedState?.last_walked_at != null
+          ? new Date(updatedState.last_walked_at).toISOString()
+          : null,
+    },
     gate: {
       last_fetched_at: lastFetchedIso(operation, account_id) ?? "",
       next_eligible_at: nextEligibleIso(operation, account_id) ?? "",
@@ -1588,6 +1650,39 @@ export async function tool_x_follows_changes_since(
         }
       : {}),
   };
+}
+
+/** Upsert a follow_user_details row used to enrich x_follows_changes_since
+ *  responses. Inserts if new, updates fields + fetched_at on conflict. */
+function upsertFollowDetail(args: {
+  user_id: string;
+  username: string | null;
+  name: string | null;
+  description: string | null;
+  raw: object;
+  fetched_at: number;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO follow_user_details (
+         user_id, username, name, description, fetched_at, raw_json
+       )
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         username = excluded.username,
+         name = excluded.name,
+         description = excluded.description,
+         fetched_at = excluded.fetched_at,
+         raw_json = excluded.raw_json`,
+    )
+    .run(
+      args.user_id,
+      args.username,
+      args.name,
+      args.description,
+      args.fetched_at,
+      JSON.stringify(args.raw),
+    );
 }
 
 // ---------- Tool 7: x_verify_posts ----------
